@@ -1,20 +1,67 @@
-1. RESEARCH OS 100 OVERVIEW
-Research OS 100 is a 100-day project to build a personal research operating system in preparation for entering a PhD program in August 2026. It focuses on startup ecosystems, venture capital, innovation policy, and the role of government intervention. This repository contains only public-facing outputs; exploratory work and raw data are stored separately in a private repository.
+▪️ Research OS 100 — Overview:
 
-2. PURPOSE
-Generative AI is advancing rapidly, and methods that once required substantial manual effort can now be produced or assisted by AI within minutes. To keep pace, it is essential to build habits of continuous experimentation and updating of research methods. The project encourages daily iteration and aims to establish a flexible workflow that evolves with new techniques. The long-term goal is to develop a semi-autonomous research agent capable of handling major parts of the research pipeline with transparent logic.
+Research OS 100 is a self-directed 100-day project starting on January 1, 2026, designed to build a personal research operating system for an AI-native investor. Inspired by rapid daily building, the project focuses on creating a flexible and evolving research environment for work on startups, venture capital, and innovation policy.
 
-3. PROJECT SCOPE
-The project includes tools for literature analysis, data collection, data processing, visualization, simple modeling, and other research utilities. Some tools may incorporate language models for tasks such as summarization, extraction, or workflow support. Each day contributes one tool or module toward building a reusable research environment.
+This repository contains only public-facing artifacts. Exploratory work, raw data, and intermediate experiments are maintained separately in a private repository.
 
-4. REPOSITORY STRUCTURE
-Public notebooks are stored in the notebooks directory, reusable scripts in the src directory, and figures or references in the docs directory. Private work, drafts, and raw datasets are maintained in researchOS100-private.
+▪️ Purpose:
 
-5. PROGRESS SUMMARY
-Day 1 focused on creating a custom viewer to retrieve and organize arXiv papers related to startups, venture capital, and innovation policy. The tool includes a query interface, sorting by publication date, a clean display, and CSV export. This formed the initial template for the project.
+Generative AI has dramatically lowered the cost of producing research outputs. As a result, the primary bottleneck in research has shifted from execution to iteration.
 
-7. TECHNICAL ENVIRONMENT
-The project uses Python, Jupyter Lab, and standard scientific libraries. Additional APIs and language models may be added as the project develops.
+The purpose of Research OS 100 is to develop the habit of continuous experimentation by prioritizing speed over polish and improvement over completion. Rather than optimizing for finished products, the project emphasizes documenting the thinking process itself, so that methods can be revisited, refined, or replaced as tools and models evolve.
 
-8. LONG-TERM GOAL
-Research OS 100 aims to create a reproducible and scalable research foundation for long-term work in startup ecosystems, venture capital, and innovation policy. The objective is to enter the PhD program with a fully operational research environment and the habit of continuously updating methods.
+▪️ Project Scope:
+
+The project covers practical research utilities, including the following areas.
+・Literature discovery and review
+・Data collection and lightweight processing
+・Visualization and exploratory analysis
+・Simple modeling and evaluation workflows
+
+Large language models may be used for tasks such as summarization, extraction, scoring, or workflow support. Each day contributes one small but functional component toward a reusable and extensible research system.
+
+▪️ Non-goals:
+
+Research OS 100 does not aim to produce polished academic papers, investment recommendations, or production-grade systems.
+
+Outputs are intentionally lightweight, experimental, and subject to frequent revision. The focus is on learning velocity and system design rather than completeness or optimality.
+
+▪️ Repository Structure:
+
+notebooks/
+・Public Jupyter notebooks demonstrating daily tools, experiments, and prototypes.
+
+src/
+・Reusable scripts, helpers, and shared utilities.
+
+docs/
+・Figures, references, and supporting materials.
+
+Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
+
+▪️ Progress Summary:
+
+At the time of writing, Research OS 100 has not yet started.
+
+Once the project begins, this section will be updated daily to record each tool, experiment, and design decision made over the 100-day period. The log will capture both successful implementations and failed attempts, serving as a chronological record of iterative learning and system evolution.
+
+▪️ Technical Environment:
+
+The project is implemented primarily in Python using Jupyter Lab and standard scientific computing libraries. External APIs and large language models are integrated as needed, with an intentionally flexible technical stack to accommodate rapid changes in tools, models, and best practices.
+
+▪️ Note on AI Usage:
+
+Large language models are used as research aids, such as summarization, extraction, ideation, and workflow support, not as authoritative sources.
+
+All interpretations, judgments, and conclusions remain human-driven, and any errors or omissions are the author’s responsibility.
+
+▪️ Long-term Goal:
+
+The long-term goal of Research OS 100 is to establish a reproducible, scalable, and continuously evolving research foundation at the intersection of startups, venture capital, and innovation policy.
+
+Beyond the 100-day challenge, the system is intended to remain under active development, gradually enabling partial automation of the research pipeline while preserving transparency and human judgment.
+
+▪️ Disclaimer:
+
+This project is a personal, self-directed research initiative.
+All views, analyses, and tools presented here are solely my own and do not represent the views of any current or past employer, organization, or affiliated institution.

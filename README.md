@@ -39,11 +39,9 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary:
+▪️ Progress Summary (as of Day 001):
 
-At the time of writing, Research OS 100 has not yet started.
-
-Once the project begins, this section will be updated daily to record each tool, experiment, and design decision made over the 100-day period. The log will capture both successful implementations and failed attempts, serving as a chronological record of iterative learning and system evolution.
+Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
 ▪️ Technical Environment:
 

@@ -39,9 +39,11 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 001):
+▪️ Progress Summary (as of Day 002):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
+Day 002 focused on building a keyword-based paper retrieval pipeline using the OpenAlex API, including parameterized search, cursor-based pagination, normalization into tabular form, and exportable artifacts (CSV / metadata) for downstream analysis.
+
 
 ▪️ Technical Environment:
 

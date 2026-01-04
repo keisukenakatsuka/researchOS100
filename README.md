@@ -39,7 +39,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 003):
+▪️ Progress Summary (as of Day 004):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -47,6 +47,7 @@ Day 002 focused on building a keyword-based paper retrieval pipeline using the O
 
 Day 003 focused on constructing a citation network crawler using the OpenAlex API, starting from a focal paper and expanding via cited-by relationships with BFS. The workflow produces graph-ready node and edge data, persisted as reusable artifacts for visualization and subsequent network analysis.
 
+Day 004 focused on converting a local PDF paper into a set of presentation-ready slide images by generating structured summaries and full slide visuals via LLMs and Gemini, enabling rapid grasp of a paper’s structure before detailed reading.
 
 ▪️ Technical Environment:
 

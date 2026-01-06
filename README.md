@@ -39,7 +39,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 005):
+▪️ Progress Summary (as of Day 006):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -50,6 +50,8 @@ Day 003 focused on constructing a citation network crawler using the OpenAlex AP
 Day 004 focused on converting a local PDF paper into a set of presentation-ready slide images by generating structured summaries and full slide visuals via LLMs and Gemini, enabling rapid grasp of a paper’s structure before detailed reading.
 
 Day 005 focused on building a startup portfolio intelligence pipeline that scrapes public portfolio pages, enriches company-level data with metadata and textual signals, normalizes features, and produces reusable portfolio- and company-level artifacts for comparison, diagnostics, and downstream analysis.
+
+Day 006 focused on building a RAG-based research question generation workflow that integrates Google Drive PDFs and prior Notion RQ memos. The notebook enables an end-to-end loop from idea input and evidence retrieval to structured RQ generation, refinement, and persistence into a Notion research database.
 
 ▪️ Technical Environment:
 

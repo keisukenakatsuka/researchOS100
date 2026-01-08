@@ -55,7 +55,7 @@ Day 006 focused on building a RAG-based research question generation workflow th
 
 Day 007 focused on building a parametric VC portfolio MOIC estimation workflow. The notebook combines round-level investment assumptions with CSE-based investment and exit evidence, applies fast snippet-based exit tagging and confidence heuristics, and aggregates deal-level outcomes into scenario-comparable portfolio MOIC estimates.
 
-Day 009 focused on reconstructing structured startup profiles from public web sources using Google CSE and LLMs. The workflow separates search by attribute, enforces robots-aware scraping, and integrates field-level summaries with evidence URLs and confidence scores into reusable, inspection-ready startup profile artifacts.
+Day 008 focused on reconstructing structured startup profiles from public web sources using Google CSE and LLMs. The workflow separates search by attribute, enforces robots-aware scraping, and integrates field-level summaries with evidence URLs and confidence scores into reusable, inspection-ready startup profile artifacts.
 
 ▪️ Technical Environment:
 

@@ -39,7 +39,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 007):
+▪️ Progress Summary (as of Day 008):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -54,6 +54,8 @@ Day 005 focused on building a startup portfolio intelligence pipeline that scrap
 Day 006 focused on building a RAG-based research question generation workflow that integrates Google Drive PDFs and prior Notion RQ memos. The notebook enables an end-to-end loop from idea input and evidence retrieval to structured RQ generation, refinement, and persistence into a Notion research database.
 
 Day 007 focused on building a parametric VC portfolio MOIC estimation workflow. The notebook combines round-level investment assumptions with CSE-based investment and exit evidence, applies fast snippet-based exit tagging and confidence heuristics, and aggregates deal-level outcomes into scenario-comparable portfolio MOIC estimates.
+
+Day 009 focused on reconstructing structured startup profiles from public web sources using Google CSE and LLMs. The workflow separates search by attribute, enforces robots-aware scraping, and integrates field-level summaries with evidence URLs and confidence scores into reusable, inspection-ready startup profile artifacts.
 
 ▪️ Technical Environment:
 

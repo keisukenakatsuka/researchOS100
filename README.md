@@ -39,7 +39,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 012):
+▪️ Progress Summary (as of Day 013):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -64,6 +64,8 @@ Day 010 focused on automating pre-meeting research for initial startup meetings 
 Day 011 focused on building a cross-market IPO revenue analysis pipeline using SEC and EDINET data. The workflow extracts, normalizes, and merges US and JP prospectus revenues, implements rigorous QA to detect and exclude outliers, and enables fair comparative analysis of revenue levels and growth dynamics.
 
 Day 012 focused on designing and prototyping a lightweight, meeting-oriented person deep-dive notebook. Using Google CSE and LLMs, it synthesizes public signals into hypothesis-driven, evidence-linked individual briefs with explicit uncertainty, optimized for pre-meeting preparation.
+
+Day 013 focused on building an end-to-end “Startup Databook” notebook. Using Google CSE and LLMs, it systematically discovers, validates, structures, translates, deduplicates, and exports startup data from public sources with strong emphasis on legality, reproducibility, and auditability.
 
 ▪️ Technical Environment:
 

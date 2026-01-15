@@ -39,7 +39,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 014):
+▪️ Progress Summary (as of Day 015):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -69,6 +69,7 @@ Day 013 focused on building a reusable “Startup Databook” notebook that syst
 
 Day 014 focused on building a forward-looking benchmark notebook using historical TSE Growth IPO data. By normalizing pre-IPO revenues and aligning relative years, it enables rapid sanity checks of an investment candidate’s revenue scale and trajectory against market percentiles.
 
+Day 015 focused on building an end-to-end PDF-to-knowledge workflow. The notebook parses academic PDFs into structured representations, persists research summaries in Notion, and generates slide-ready visual one-pagers via Gemini, enabling fast, reusable paper understanding and presentation.
 
 ▪️ Technical Environment:
 

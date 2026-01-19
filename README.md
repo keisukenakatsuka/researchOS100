@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 018):
+▪️ Progress Summary (as of Day 019):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -80,6 +80,8 @@ Day 016 focused on building a weekly news ingestion pipeline using NewsAPI for i
 Day 017 focused on building a weekly aggregation and visualization layer on top of the NewsAPI pipeline. The notebook computes normalized keyword and category-level metrics, generates robust time-series plots and heatmaps, and produces a weekly insight table designed for stable, automated trend monitoring.
 
 Day 018 focused on designing and implementing a weekly Japan corporate registry ingestion and aggregation pipeline using the National Tax Agency’s Web-API. The workflow computes municipality-level net changes from new registrations, closures, and relocations, producing reusable, geospatial-ready weekly datasets.
+
+Day 019 focused on building a robust PDF ingestion and knowledge persistence pipeline. The notebook automatically fetches open-access papers from the seed corpus, handles retries and deduplication, uploads PDFs to Google Drive, and upserts structured literature records into a Notion database for downstream research workflows.
 
 ▪️ Technical Environment:
 

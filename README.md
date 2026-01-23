@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 020):
+▪️ Progress Summary (as of Day 023):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -84,6 +84,12 @@ Day 018 focused on designing and implementing a weekly Japan corporate registry 
 Day 019 focused on building a robust PDF ingestion and knowledge persistence pipeline. The notebook automatically fetches open-access papers from the seed corpus, handles retries and deduplication, uploads PDFs to Google Drive, and upserts structured literature records into a Notion database for downstream research workflows.
 
 Day 020 focused on implementing a backward-fill workflow for high-quality literature expansion. Starting from highly cited, RQ-aligned core papers, the notebook traverses citation links backward to identify foundational works, prioritizes candidates by citation signals and RQ fit, and persists results to Drive and Notion for systematic human review.
+
+Day 021 focused on transforming the accumulated literature corpus into a directed citation graph. The workflow unified paper identifiers, constructed node–edge tables, computed centrality and communities, and generated visualization-ready exports and reading-order maps to turn citation structure into actionable research navigation.
+
+Day 022 focused on operationalizing research gap mining as a persistent, cluster-wise workflow. Citation-network-derived gaps were normalized, prioritized, and continuously tracked in Notion with diff-based updates, enabling gaps to be treated as evolving research assets rather than one-off analytical outputs.
+
+Day 023 focused on building a fully incremental, state-aware daily paper scanner. The pipeline retrieves only newly published papers since the last run, classifies relevance against existing Research Questions with rationales, and robustly upserts only relevant results into Notion using a schema-flexible design.
 
 ▪️ Technical Environment:
 

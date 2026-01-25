@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 023):
+▪️ Progress Summary (as of Day 025):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -90,6 +90,10 @@ Day 021 focused on transforming the accumulated literature corpus into a directe
 Day 022 focused on operationalizing research gap mining as a persistent, cluster-wise workflow. Citation-network-derived gaps were normalized, prioritized, and continuously tracked in Notion with diff-based updates, enabling gaps to be treated as evolving research assets rather than one-off analytical outputs.
 
 Day 023 focused on building a fully incremental, state-aware daily paper scanner. The pipeline retrieves only newly published papers since the last run, classifies relevance against existing Research Questions with rationales, and robustly upserts only relevant results into Notion using a schema-flexible design.
+
+Day 024 focused on systematically updating Research Questions from new evidence and human intent. The notebook synthesizes recent literature updates and meeting-driven change requests, proposes versioned RQ edits or new RQs with evidence links, and writes draft proposals back to Notion for structured human review.
+
+Day 025 focused on demonstrating end-to-end research automation orchestration. The pipeline sequentially executes prior notebooks from corpus updates to RQ revisions, compiles daily and weekly summary reports, records run manifests, and provides a minimal CLI and CI-ready skeleton to validate researchOS as an integrated, operable system.
 
 ▪️ Technical Environment:
 

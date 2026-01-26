@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 025):
+▪️ Progress Summary (as of Day 026):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -94,6 +94,8 @@ Day 023 focused on building a fully incremental, state-aware daily paper scanner
 Day 024 focused on systematically updating Research Questions from new evidence and human intent. The notebook synthesizes recent literature updates and meeting-driven change requests, proposes versioned RQ edits or new RQs with evidence links, and writes draft proposals back to Notion for structured human review.
 
 Day 025 focused on demonstrating end-to-end research automation orchestration. The pipeline sequentially executes prior notebooks from corpus updates to RQ revisions, compiles daily and weekly summary reports, records run manifests, and provides a minimal CLI and CI-ready skeleton to validate researchOS as an integrated, operable system.
+
+Day 026 focused on building a structure-driven, skill-aware notebook generator. Using a two-phase approach, the system treats structure as the single source of truth and injects accumulated “human correction” Skills into Claude prompts, enabling reproducible, incrementally improvable Jupyter notebook generation.
 
 ▪️ Technical Environment:
 

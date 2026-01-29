@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 027):
+▪️ Progress Summary (as of Day 029):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -98,6 +98,10 @@ Day 025 focused on demonstrating end-to-end research automation orchestration. T
 Day 026 focused on building a structure-driven, skill-aware notebook generator. Using a two-phase approach, the system treats structure as the single source of truth and injects accumulated “human correction” Skills into Claude prompts, enabling reproducible, incrementally improvable Jupyter notebook generation.
 
 Day 027 focused on ingesting high-value human corrections from LLM interaction logs into a persistent Skill store. The pipeline extracts reasoning and structural fixes, normalizes them into reusable Skill records, deduplicates via JSONL, and synchronizes them to a schema-adaptive Notion database.
+
+Day 028 focused on establishing a stable execution bootstrap and state layer for researchOS. The notebook centralizes environment loading, configuration normalization, run context initialization, persistent JSON-based state, and logging, enabling downstream pipelines to run deterministically, idempotently, and safely.
+
+Day 029 focused on building a robust, SDK-independent Notion I/O layer for researchOS. The notebook implements REST-based clients, schema- and data-source–aware introspection, error classification, retries, and idempotent CRUD wrappers, enabling reliable daily operation across all research and monitoring databases.
 
 ▪️ Technical Environment:
 

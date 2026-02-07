@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 029):
+▪️ Progress Summary (as of Day 041):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -102,6 +102,30 @@ Day 027 focused on ingesting high-value human corrections from LLM interaction l
 Day 028 focused on establishing a stable execution bootstrap and state layer for researchOS. The notebook centralizes environment loading, configuration normalization, run context initialization, persistent JSON-based state, and logging, enabling downstream pipelines to run deterministically, idempotently, and safely.
 
 Day 029 focused on building a robust, SDK-independent Notion I/O layer for researchOS. The notebook implements REST-based clients, schema- and data-source–aware introspection, error classification, retries, and idempotent CRUD wrappers, enabling reliable daily operation across all research and monitoring databases.
+
+Day 030 focused on implementing a safe, idempotent daily paper scanner. The pipeline incrementally fetches recent papers from arXiv and Semantic Scholar, applies multi-stage deduplication, generates short summaries, and ingests only new, relevant items into the Notion Papers inbox with full run-state tracking.
+
+Day 031 focused on processing a PDF inbox into a fully tracked Papers pipeline. It extracts and repairs metadata, deduplicates against Notion, creates INBOX records, generates one-slide visual summaries, uploads PDFs and artifacts to Google Drive, writes links back to Notion, and safely moves files with partial-failure tolerance.
+
+Day 032 focused on operationalizing daily VC monitoring as a robust, idempotent event pipeline. It loads VC targets from Notion, fetches RSS/HTML (optionally NewsAPI), normalizes date-safe event candidates, applies freshness/window filters, deduplicates in-memory and against Notion, writes only new Events via 029 wrappers, and outputs clean Markdown/Slack run summaries.
+
+Day 033 focused on launching a startup-domain daily monitoring pipeline. It queries startup targets from Notion, fetches recent updates, normalizes items into tagged startup events, extracts high-value correction signals, and writes results back to Notion with robust partial-failure handling, producing an execution summary for daily operations.
+
+Day 034 focused on extending the daily monitoring framework to the POLICY domain. By cloning the VC pipeline with a strict domain swap, the notebook fetches RSS/HTML/NewsAPI updates, normalizes date-safe policy events, applies consistent deduplication, writes new Events to Notion via shared wrappers, updates state, and produces standardized Markdown and Slack run summaries.
+
+Day 035 focused on extending the daily monitoring stack to the PEOPLE domain via a strict domain swap. Cloned from the policy monitor, it fetches RSS/HTML/NewsAPI updates for tracked individuals, enriches and deduplicates items with rerun-safe keys, writes only new events to Notion via 029 wrappers, updates people-scoped state, and outputs Markdown/Slack summaries.
+
+Day 036 focused on orchestrating the full daily researchOS pipeline into a single, resilient run. The orchestrator executes config, scanning, PDF processing, and multiple monitoring modules sequentially, captures per-module metrics and errors, tolerates partial failures, and produces consolidated daily summaries in Notion-ready Markdown, standard Markdown, and Slack formats.
+
+Day 037 focused on automating minimal-diff cloning of daily monitoring notebooks. Using a structure-first, two-phase workflow, the system generates a deterministic skeleton from Cell 00, then plans keep/edit decisions and applies per-cell patches one at a time, optionally guided by a retrieved Skill Pack to preserve invariants and reduce maintenance drift.
+
+Day 038 focused on generating meeting-ready, fully editable Japanese PPTX decks via an LLM-driven, human-in-the-loop workflow. It collects meeting context, uses OpenAI to produce an outline and slide JSON specs, generates cover/right-panel images with Gemini, and assembles a strict two-column PPTX with editable text boxes and replaceable visuals.
+
+Day 039 focused on extending the structure-driven notebook generator into an iterative build-test-repair loop. After generating a skeleton from Cell 00, the system fills cells one-by-one, executes a deterministic prefix to capture outputs, and automatically repairs failures by generating OpenAI repair prompts and applying Claude JSON patches—advancing only when the prefix succeeds.
+
+Day 040 focused on building a weekly papers review workflow to reduce noise and produce a curated reading list. It queries the last 7 days of Notion-ingested papers via the data_sources API, ranks them by importance and RQ relevance, applies READ/KEEP/SKIP decisions with optional human overrides, and exports weekly artifacts and summaries for worldview updates.
+
+Day 041 focused on producing a weekly events digest from Notion Events. It queries the past week in JST via the data_sources API, normalizes records, deduplicates and filters noise, clusters events into interpretable themes, ranks themes by impact, and renders a Markdown digest with exported JSON/MD artifacts, optionally upserting an append-only weekly digest page in Notion.
 
 ▪️ Technical Environment:
 

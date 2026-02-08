@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 041):
+▪️ Progress Summary (as of Day 043):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -126,6 +126,10 @@ Day 039 focused on extending the structure-driven notebook generator into an ite
 Day 040 focused on building a weekly papers review workflow to reduce noise and produce a curated reading list. It queries the last 7 days of Notion-ingested papers via the data_sources API, ranks them by importance and RQ relevance, applies READ/KEEP/SKIP decisions with optional human overrides, and exports weekly artifacts and summaries for worldview updates.
 
 Day 041 focused on producing a weekly events digest from Notion Events. It queries the past week in JST via the data_sources API, normalizes records, deduplicates and filters noise, clusters events into interpretable themes, ranks themes by impact, and renders a Markdown digest with exported JSON/MD artifacts, optionally upserting an append-only weekly digest page in Notion.
+
+Day 042 focused on updating weekly RQ understanding as review-ready, evidence-linked proposals. The notebook screens this week’s papers and events for RQ relevance, generates overwrite-ready updates per change category (Rationale/Approach/Gap/etc.), writes one Notion page per RQ×Category with explicit evidence relations and confidence, and links all updates back to the latest Weekly Digest.
+
+Day 043 focused on establishing a weekly review and tuning loop for all monitoring targets. The notebook aggregates recent Events to evaluate signal vs noise per target, proposes concrete configuration changes (priority, cadence, status, keywords, sources), writes reviewable proposal pages to Notion, and exports charts, CSVs, and a text report for the weekly review packet.
 
 ▪️ Technical Environment:
 

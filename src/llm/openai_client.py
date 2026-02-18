@@ -104,6 +104,16 @@ class OpenAIClient:
         from openai import OpenAI
         self._client = OpenAI(api_key=api_key, timeout=timeout_sec)
 
+    @property
+    def raw_client(self):
+        """Expose the underlying ``openai.OpenAI`` instance for non-chat APIs.
+
+        Used by ``LLMRouter`` for Whisper (audio.transcriptions) and
+        TTS (audio.speech) calls.  Business logic must NOT access this
+        directly — always go through the router.
+        """
+        return self._client
+
     # ---- Cache helpers ----
 
     def _cache_key(self, model: str, system: str, user: str) -> str:

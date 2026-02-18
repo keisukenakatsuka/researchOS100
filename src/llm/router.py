@@ -159,6 +159,84 @@ class LLMRouter:
             )
         return self.call(task_type=TASK_VOICE, system=system, user=user, **kwargs)
 
+    def transcribe_audio(
+        self,
+        audio_path: Path,
+        *,
+        voice_config: Optional[Any] = None,
+    ) -> str:
+        """Transcribe an audio file via OpenAI Whisper.
+
+        Parameters
+        ----------
+        audio_path : Path
+            Path to audio file (.wav, .mp3, etc.).
+        voice_config : VoiceConfig or None
+            When provided, ``stt_language_hint`` is passed to Whisper.
+
+        Returns
+        -------
+        str
+            Transcribed text.
+        """
+        stt_model = "whisper-1"
+        language = None
+        if voice_config is not None:
+            stt_model = voice_config.stt_model
+            language = voice_config.stt_language_hint
+            logger.info(
+                "Transcribing audio: model=%s language=%s file=%s",
+                stt_model, language, audio_path.name,
+            )
+        else:
+            logger.info("Transcribing audio: model=%s file=%s", stt_model, audio_path.name)
+
+        with open(audio_path, "rb") as f:
+            kwargs: Dict[str, Any] = {"model": stt_model, "file": f}
+            if language:
+                kwargs["language"] = language
+            result = self._openai.raw_client.audio.transcriptions.create(**kwargs)
+        return result.text
+
+    def speak_text(
+        self,
+        text: str,
+        output_path: Path,
+        *,
+        voice_config: Optional[Any] = None,
+    ) -> Path:
+        """Generate speech audio via OpenAI TTS.
+
+        Parameters
+        ----------
+        text : str
+            Text to speak.
+        output_path : Path
+            Where to write the audio file.
+        voice_config : VoiceConfig or None
+            TTS model and voice settings.
+
+        Returns
+        -------
+        Path
+            Path to generated audio file.
+        """
+        tts_model = "tts-1"
+        tts_voice = "alloy"
+        if voice_config is not None:
+            tts_model = voice_config.tts_model
+            tts_voice = voice_config.tts_voice
+        logger.info("TTS: model=%s voice=%s -> %s", tts_model, tts_voice, output_path.name)
+
+        response = self._openai.raw_client.audio.speech.create(
+            model=tts_model,
+            voice=tts_voice,
+            input=text,
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        response.stream_to_file(str(output_path))
+        return output_path
+
     @property
     def usage_summary(self) -> str:
         return self._openai.usage_summary()

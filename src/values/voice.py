@@ -227,11 +227,14 @@ def summarize_reflection_session(
     responses: Tuple[ReflectionResponse, ...],
     *,
     voice_config: Optional[VoiceConfig] = None,
+    router: Optional[object] = None,
 ) -> str:
     """Generate an AI summary of a complete reflection session.
 
     Produces a summary in the configured language. For Japanese sessions,
     the summary is written in natural Japanese.
+
+    All LLM calls go through the ``router`` parameter (LLMRouter).
 
     Parameters
     ----------
@@ -239,20 +242,56 @@ def summarize_reflection_session(
         All responses from the session.
     voice_config : VoiceConfig or None
         Voice configuration. Defaults to ``VoiceConfig()`` (Japanese).
+    router : LLMRouter or None
+        LLM router for summarization call.  Required for actual
+        summarization.  When None, returns a placeholder string.
 
     Returns
     -------
     str
         AI-generated summary of the session in the target language.
-
-    Raises
-    ------
-    NotImplementedError
-        Voice session summarization is not yet implemented.
     """
     config = voice_config or VoiceConfig()
-    raise NotImplementedError(
-        f"Voice session summarization not yet implemented "
-        f"(language={config.language}). "
-        f"See src/values/voice.py for the planned API contract."
+
+    if not responses:
+        return ""
+
+    if router is None:
+        return "[AI Summary unavailable — no LLM router provided]"
+
+    # Build transcript block for the LLM.
+    transcript_lines = []
+    for resp in responses:
+        transcript_lines.append(
+            f"Domain: {resp.domain_id}\n"
+            f"Question: {resp.question_text}\n"
+            f"Response: {resp.transcript}"
+        )
+    transcript_block = "\n---\n".join(transcript_lines)
+
+    system = (
+        "You are a reflective coaching assistant. "
+        "The user has completed a value reflection session where they "
+        "answered questions about different life domains. "
+        "Summarize the session: highlight key themes, areas of strength, "
+        "and areas where the user expressed tension or misalignment. "
+        "Be concise (3–5 sentences). "
+        "This summary is clearly AI-generated and should be labeled as such."
     )
+    user_prompt = (
+        f"Here are the reflection transcripts from today's session:\n\n"
+        f"{transcript_block}\n\n"
+        f"Please provide a brief summary."
+    )
+
+    result = router.call_voice_processing(
+        system=system,
+        user=user_prompt,
+        voice_config=config,
+    )
+    # The router returns JSON; extract the summary text.
+    summary = result.parsed.get("summary", "")
+    if not summary:
+        # Fallback: use raw text if JSON structure doesn't match.
+        summary = result.raw_text
+    return f"[AI-Generated Summary]\n{summary}"

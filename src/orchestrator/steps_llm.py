@@ -1,6 +1,7 @@
 # src/orchestrator/steps_llm.py
 from __future__ import annotations
-
+from typing import Tuple
+from typing import Optional
 """
 LLM steps for the Notebook Builder loop.
 
@@ -40,8 +41,10 @@ Policy decisions applied in this version
 import json
 import os
 import time
+
 from dataclasses import dataclass
 from pathlib import Path
+from src.telemetry.llm_trace import append_llm_trace, _now_iso  # _now_isoはexportしてもよい
 from typing import Any, Dict, List, Optional, Union
 import re
 import nbformat
@@ -57,6 +60,19 @@ from src.state.state_store import (
     bump_metric,
 )
 
+# --- Discover project root (directory containing "src/") ---
+cwd = Path.cwd()
+project_root = None
+
+cursor = cwd
+for _ in range(8):  # safety limit to avoid infinite loop
+    if (cursor / "src").is_dir():
+        project_root = cursor
+        break
+    if cursor.parent == cursor:
+        break
+    cursor = cursor.parent
+    
 # -----------------------------
 # Structure seed schema (LLM produces ONLY structure)
 # -----------------------------
@@ -418,6 +434,56 @@ Repo API contract (MUST FOLLOW)
 - DO NOT use Notion REST (no notion_get/notion_post/requests/"/v1/").
 - Property names you use MUST exist in schema_snapshot for the target DB.
 """
+def _extract_runtime_context_pack(target: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    one_loop.py may inject a context_pack into LLM_PLAN / LLM_IMPLEMENT targets.
+    We keep this best-effort and optional to avoid breaking older queues.
+    Expected keys (best-effort):
+      - available_symbols: list[str]
+      - cell_facts_tail: list[dict]
+      - upstream_sources: list[{cell_index:int, source:str}]
+      - cell_facts_path: str (artifacts path pointer)
+      - schema_snapshot / last_error (already handled elsewhere)
+    """
+    cp = target.get("context_pack")
+    return cp if isinstance(cp, dict) else {}
+
+def _build_upstream_context_text(
+    *,
+    runtime_cp: Dict[str, Any],
+    max_chars: int = 9000,
+) -> str:
+    """
+    Human-readable block (not part of 5-point context pack) to reduce symbol drift across cells.
+    """
+    if not isinstance(runtime_cp, dict) or not runtime_cp:
+        return ""
+
+    payload: Dict[str, Any] = {}
+    # Keep these small + stable
+    if isinstance(runtime_cp.get("available_symbols"), list):
+        payload["available_symbols"] = runtime_cp.get("available_symbols")
+    if isinstance(runtime_cp.get("cell_facts_tail"), list):
+        payload["cell_facts_tail"] = runtime_cp.get("cell_facts_tail")
+    if isinstance(runtime_cp.get("upstream_sources"), list):
+        payload["upstream_sources"] = runtime_cp.get("upstream_sources")
+    if runtime_cp.get("cell_facts_path"):
+        payload["cell_facts_path"] = str(runtime_cp.get("cell_facts_path"))
+
+    if not payload:
+        return ""
+
+    s = _safe_json_dump(payload, max_chars=max_chars)
+    return (
+        "UPSTREAM CONTEXT (runtime facts; MUST FOLLOW):\n"
+        "- available_symbols: names known to exist upstream (avoid NameError)\n"
+        "- upstream_sources: prior cell code sources (prefer reusing variables)\n"
+        "- cell_facts_tail: recent per-cell facts\n"
+        "- cell_facts_path: pointer to artifacts snapshot (if present)\n"
+        "----- BEGIN UPSTREAM CONTEXT JSON -----\n"
+        f"{s}\n"
+        "----- END UPSTREAM CONTEXT JSON -----\n\n"
+    )
 
 def _extract_structure_json_min(cell00_src: str, *, max_chars: int = 2500) -> str:
     """
@@ -569,12 +635,20 @@ def _min_last_error_summary(last_error: Dict[str, Any]) -> Dict[str, Any]:
     """
     if not isinstance(last_error, dict):
         return {}
-    out = {
-        "failing_cell_index": last_error.get("failing_cell_index") or last_error.get("cell_index"),
-        "exception": last_error.get("exception_message") or "",
-        "error_summary": last_error.get("error_summary") or "",
-        "cause_hint": last_error.get("next_action") or last_error.get("category") or "",
-    }
+    out: Dict[str, Any] = {}
+    # IMPORTANT: do NOT emit nulls for optional integer fields (Claude schema compatibility)
+    fci = last_error.get("failing_cell_index")
+    if fci is None:
+        fci = last_error.get("cell_index")
+    try:
+        if fci is not None:
+            out["failing_cell_index"] = int(fci)
+    except Exception:
+        pass
+    out["exception"] = str(last_error.get("exception_message") or "")
+    out["error_summary"] = str(last_error.get("error_summary") or "")
+    out["cause_hint"] = str(last_error.get("next_action") or last_error.get("category") or "")
+
     # keep traceback to 3-10 lines max
     tb = str(last_error.get("traceback") or "")
     if tb:
@@ -842,6 +916,7 @@ def llm_plan_step(
     """
     import os
     import time
+    _trace_root = project_root or Path.cwd()
 
     task_page_id = target.get("task_page_id")
     proposal_page_id = target.get("proposal_page_id")
@@ -853,7 +928,7 @@ def llm_plan_step(
             reason="LLM_PLAN missing task_page_id/proposal_page_id/notebook_path",
         )
         return {"ok": False, "message": "LLM_PLAN missing required fields"}
-
+    _trace_group = f"proposal={proposal_page_id}|task_item={task_item_id}"
     # Prevent queue bloat: cancel existing TODO steps for the same proposal before enqueueing a fresh plan
     try:
         cancelled_n = _cancel_todo_for_same_proposal(
@@ -879,12 +954,18 @@ def llm_plan_step(
     last_error_min = _min_last_error_summary(last_error if isinstance(last_error, dict) else {})
 
     # ---------------------------------------------------------
+    # ✅ NEW: runtime upstream facts injected by one_loop (optional)
+    # ---------------------------------------------------------
+    runtime_cp = _extract_runtime_context_pack(target)
+    upstream_ctx_text = _build_upstream_context_text(runtime_cp=runtime_cp, max_chars=8000)
+ 
+    # ---------------------------------------------------------
     # Task fields: ALWAYS try to hydrate from Notion task page
     # (target.task_fields is often missing in queue items)
     # ---------------------------------------------------------
     def _prop_to_text(p: dict) -> str:
         if not isinstance(p, dict):
-            return str(p)
+            return str(p or "")
         t = (p.get("type") or "").lower()
         if t in ("title", "rich_text"):
             arr = p.get(t) or []
@@ -909,7 +990,8 @@ def llm_plan_step(
             return ", ".join([x.get("id","") for x in arr if isinstance(x, dict)]).strip()
         return str(p)
 
-    task_fields = target.get("task_fields") if isinstance(target.get("task_fields"), dict) else {}
+    # NOTE: task_fields is SINGLE source of truth in this function (avoid double-init / accidental overwrite)
+    task_fields: Dict[str, Any] = target.get("task_fields") if isinstance(target.get("task_fields"), dict) else {}
     hydrated_from_task = False
     try:
         if (not task_fields) and hasattr(repos, "tasks") and hasattr(repos.tasks, "retrieve_page"):
@@ -972,12 +1054,14 @@ def llm_plan_step(
             out[str(name)] = _rt_plain(pv)
         return out
 
-    # 1) Prefer explicit target.task_fields
-    task_fields: Dict[str, str] = {}
-    if isinstance(target.get("task_fields"), dict):
-        # normalize to str->str
-        for k, v in (target.get("task_fields") or {}).items():
-            task_fields[str(k)] = _rt_plain(v)
+    # 1) Normalize explicit target.task_fields (if present) WITHOUT overwriting hydrated task_fields
+    if isinstance(task_fields, dict) and task_fields:
+        _tmp: Dict[str, str] = {}
+        for k, v in (task_fields or {}).items():
+            _tmp[str(k)] = _rt_plain(v)
+        task_fields = _tmp
+    else:
+        task_fields = {}
 
     # 2) If missing, fetch from Notion via repos.tasks.query_tasks(page_id=task_page_id)
     #    (repos.tasks has only: create_task/get_database_meta/query_tasks)
@@ -1111,8 +1195,53 @@ def llm_plan_step(
                 json_schema=STRUCTURE_SEED_JSON_SCHEMA,
             )
         except ClaudeStructuredOutputError as e:
+        # Trace: error
+            # Trace: error (STRUCTURE_SEED)
+            try:
+                append_llm_trace(
+                    project_root=_trace_root,
+                    run_id=str(proposal_page_id),
+                    event={
+                        "ts": _now_iso(),
+                        "group": _trace_group,
+                        "step_type": "LLM_STRUCTURE_SEED_ERROR",
+                        "task_item_id": str(task_item_id),
+                        "task_page_id": str(task_page_id),
+                        "proposal_page_id": str(proposal_page_id),
+                        "notebook_path": str(notebook_path),
+                        "model": str(model),
+                        "error": {"type": type(e).__name__, "message": str(e)},
+                    },
+                )
+            except Exception:
+                pass
             mark_failed(store, task_item_id=task_item_id, reason=f"STRUCTURE_SEED JSON error: {e}")
             return {"ok": False, "message": f"STRUCTURE_SEED JSON error: {e}"}
+
+        # Trace: response (STRUCTURE_SEED)
+        try:
+            append_llm_trace(
+                project_root=_trace_root,
+                run_id=str(proposal_page_id),
+                event={
+                    "ts": _now_iso(),
+                    "group": _trace_group,
+                    "step_type": "LLM_STRUCTURE_SEED_RESULT",
+                    "task_item_id": str(task_item_id),
+                    "task_page_id": str(task_page_id),
+                    "proposal_page_id": str(proposal_page_id),
+                    "notebook_path": str(notebook_path),
+                    "model": str(model),
+                    "response": {
+                        "parsed_json": (res_seed.parsed_json or {}),
+                        "usage": getattr(res_seed.usage, "__dict__", res_seed.usage),
+                    },
+                },
+            )
+        except Exception:
+            pass
+ 
+
 
         seed_obj = res_seed.parsed_json or {}
         seed_structure_raw = seed_obj.get("structure") or []
@@ -1161,6 +1290,23 @@ def llm_plan_step(
         return {"ok": True, "message": f"Seeded structure ({len(seed_structure)} cells) from Tasks", "structure": seed_structure}
     # Read notebook to detect bootstrap state (Cell00 lock existence)
     cells = _read_notebook_cells(notebook_path)
+
+    # ---------------------------------------------------------
+    # ✅ NEW: Always capture Cell00 + Cell01 sources (best-effort)
+    #   - Used to constrain LLM_PLAN so it follows Cell01 Repo contract
+    #   - Safe even when notebook has <2 cells
+    # ---------------------------------------------------------
+    def _read_cell00_01_sources() -> tuple[str, str]:
+        try:
+            picked = _read_notebook_cell_sources(notebook_path, [0, 1], max_chars=6000)
+            c0 = str(picked.get(0) or "")
+            c1 = str(picked.get(1) or "")
+            return c0, c1
+        except Exception:
+            return "", ""
+
+    # NOTE: define these unconditionally so later code never NameErrors
+    cell00_src_for_prompt, cell01_src_for_prompt = _read_cell00_01_sources()
     def _cell_source_text(x) -> str:
         if x is None:
             return ""
@@ -1382,12 +1528,14 @@ def llm_plan_step(
     # -----------------------------
     # STRUCTURE payload (ALWAYS non-empty)
     # -----------------------------
-    cell00_src = ""
-    try:
-        if isinstance(cells, list) and len(cells) > 0:
-            cell00_src = str(cells[0].get("source") or "")
-    except Exception:
-        cell00_src = ""
+    # Prefer the explicitly read Cell00 (may be empty for brand new notebooks)
+    cell00_src = str(cell00_src_for_prompt or "")
+    if not cell00_src:
+        try:
+            if isinstance(cells, list) and len(cells) > 0:
+                cell00_src = str(cells[0].get("source") or "")
+        except Exception:
+            cell00_src = ""
 
     # Plan structure might exist in state already (for fallback)
     st_now = _state_read(store)
@@ -1461,7 +1609,7 @@ def llm_plan_step(
     # Fallback: accept injected one_loop payload if present
     if not schema_snapshot:
         try:
-            injected = (target.get("context_pack") or {}).get("schema_snapshot")  # type: ignore[union-attr]
+            injected = (runtime_cp or {}).get("schema_snapshot")
             if isinstance(injected, dict):
                 schema_snapshot = dict(injected)
         except Exception:
@@ -1481,8 +1629,21 @@ def llm_plan_step(
         "- Cell02 is FIXED schema truth cell and must NOT be modified.\n"
         "- Plan work cells from Cell03 onward.\n"
         "\n"
+        "CRITICAL:\n"
+        "- You MUST follow the Repo contract defined in Cell01.\n"
+        "- Do NOT invent alternate repo wiring.\n"
+        "- Assume downstream cells will reuse variables/functions defined in Cell01.\n"
+         "\n"
+         "Repo wiring reality check (do NOT assume a `repos` dict):\n"
+         "- Cell01 exposes individual BaseRepo variables like:\n"
+         "  papers_repo, events_repo, rq_repo, weekly_target_update_repo\n"
+         "- Prefer those variables over any imagined registry/dict.\n"
         "Use ONLY the 5-point context pack provided by the system.\n"
         "Do not assume any property name unless it exists in schema_snapshot.\n"
+        "\n"
+        "CONSISTENCY RULES (critical for Cell03+):\n"
+        "- Reuse names that already exist upstream (see UPSTREAM CONTEXT if provided).\n"
+        "- If UPSTREAM CONTEXT provides available_symbols, prefer those names.\n"  
     )
 
 
@@ -1493,18 +1654,68 @@ def llm_plan_step(
         last_error_summary=last_error_min,
     )
 
+    # ---------------------------------------------------------
+    # ✅ NEW: Provide Cell01 (Repo contract + canonical helpers) to LLM_PLAN
+    #   - Prevents "safe fallback" / inventing repos/build_repos/etc.
+    #   - Still keeps the 5-point CONTEXT_PACK intact (we add "GLOBAL CONTEXT" separately)
+    # ---------------------------------------------------------
+    global_ctx = ""
+    if str(cell01_src_for_prompt or "").strip():
+        global_ctx = (
+            "GLOBAL CONTEXT (MUST READ): Cell01 (setup/wiring + Repo contract)\n"
+            "----- Cell01 (setup code: env, repos, helpers; treat as source of truth) -----\n"
+            f"{cell01_src_for_prompt}\n\n"
+        )
+
     user = (
         "CONTEXT_PACK (5 points, fixed):\n"
         f"{_safe_json_dump(context_pack, max_chars=9000)}\n\n"
+        f"{upstream_ctx_text}"
+        f"{global_ctx}"
         "INSTRUCTIONS:\n"
         "- Produce STRUCTURE for Cell03+ (cell_index >= 3).\n"
         "- Then propose steps (PATCH_CELL / VERIFY) to implement those cells.\n"
         "- Do NOT schedule PATCH_CELL for Cell00/01/02.\n"
-        "- Use repo_contract.\n"
+        "- Follow Cell01 Repo contract strictly (repo_query only; BaseRepo only).\n"
         "- Use only schema_snapshot property names.\n"
+        "- Ensure variable/function names stay consistent across cells (Cell03 -> Cell04+).\n"
+        "- Prefer upstream-defined names from available_symbols if provided.\n"
         "- Keep patches small.\n"
     )
 
+    # -----------------------------
+    # Trace: request (LLM_PLAN)
+    # -----------------------------
+    try:
+        append_llm_trace(
+            project_root=_trace_root,
+            run_id=str(proposal_page_id),  # using proposal as "run bucket"
+            event={
+                "ts": _now_iso(),
+                "group": _trace_group,
+                "step_type": "LLM_PLAN",
+                "task_item_id": str(task_item_id),
+                "task_page_id": str(task_page_id),
+                "proposal_page_id": str(proposal_page_id),
+                "notebook_path": str(notebook_path),
+                "model": str(model),
+                "request": {
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                    "json_schema_name": str(PLAN_JSON_SCHEMA.get("name") or ""),
+                    "temperature": float(temperature),
+                    "max_tokens": int(max_tokens),
+                },
+                "meta": {
+                    "cell01_included": bool(str(cell01_src_for_prompt or "").strip()),
+                    "cell00_len": len(str(cell00_src_for_prompt or "")),
+                    "cell01_len": len(str(cell01_src_for_prompt or "")),
+                    "upstream_ctx_included": bool(upstream_ctx_text.strip()),
+                },
+            },
+        )
+    except Exception:
+        pass
 
     # Call Claude
     try:
@@ -1537,14 +1748,14 @@ def llm_plan_step(
             patch={"result": {"plan_summary": plan_summary, "structure_preview": [], "error": "empty_structure"}},
         )
 
+        return {"ok": False, "message": "LLM_PLAN returned empty structure", "plan": {"summary": plan_summary}}
+
     # ✅ NEW: ensure the loop log shows Structure even if update_task_item is not printed by caller
-    # (This is redundant with _debug_print_structure above; kept intentionally for reliability.)
     try:
         print(f"[STRUCTURE][LLM_PLAN] structure_preview_len={len(structure_list)}")
     except Exception:
         pass
-        
-        return {"ok": False, "message": "LLM_PLAN returned empty structure", "plan": {"summary": plan_summary}}
+
     # ✅ NEW: show structure immediately in logs (before SCAFFOLD_HEADERS runs)
     _debug_print_structure(
         prefix="[STRUCTURE][LLM_PLAN]",
@@ -1749,6 +1960,8 @@ def llm_plan_step(
     if objective_raw:
         scaffold_task_fields["objective"] = objective_raw
         scaffold_task_fields.setdefault("Objective", objective_raw)
+    # IMPORTANT: never ask scaffold to touch Cell00/01/02 in post-bootstrap planning.
+    structure_for_scaffold = [it for it in structure_list if int(it.get("cell_index") or 0) >= 3]
 
     enqueue(
         store,
@@ -1763,7 +1976,7 @@ def llm_plan_step(
                 "notebook_path": str(notebook_path),
                 "task_fields": scaffold_task_fields,
                 "policy": dict(target.get("policy") or {}),
-                "structure": structure_list,   # Cell02+ only (normalize already filters <2)
+                "structure": structure_for_scaffold,
                 "cleanup_queue": True,
                 "preserve_existing": True,
             },
@@ -1881,6 +2094,14 @@ def llm_implement_step(
     proposal_page_id = target.get("proposal_page_id")
     notebook_path = target.get("notebook_path")
 
+    _trace_root = project_root or Path.cwd()
+    _trace_group = f"proposal={proposal_page_id}|task_item={task_item_id}"
+
+    # trace root (project_root may be None)
+    _trace_root = project_root or Path.cwd()
+    # "run_id" is optional; we can group by proposal+task_item+ts
+    _trace_group = f"proposal={proposal_page_id}|task_item={task_item_id}"
+
     plan_step = target.get("plan_step") or {}
     has_plan_step = isinstance(plan_step, dict) and bool(plan_step)
 
@@ -1907,7 +2128,26 @@ def llm_implement_step(
     plan_cell_index = plan_step.get("cell_index", None)
 
     cells = _read_notebook_cells(notebook_path)
-    
+    # ---------------------------------------------------------
+    # ✅ NEW: Always capture Cell00 + Cell01 sources (best-effort)
+    #   - Used to constrain LLM_PLAN so it follows Cell01 Repo contract
+    #   - Safe even when notebook has <2 cells
+    # ---------------------------------------------------------
+    def _read_cell00_01_sources() -> Tuple[str, str]:
+        try:
+            picked = _read_notebook_cell_sources(notebook_path, [0, 1], max_chars=6000)
+            c0 = str(picked.get(0) or "")
+            c1 = str(picked.get(1) or "")
+            return c0, c1
+        except Exception:
+            return "", ""
+
+    cell00_src_for_prompt, cell01_src_for_prompt = _read_cell00_01_sources()
+
+    # If Cell00 isn't readable yet (e.g., empty nb), fall back to existing logic later
+    # NOTE: For bootstrap phase, LLM_PLAN returns early and does not call Claude,
+    #       so this is primarily for POST_BOOTSTRAP normal planning.
+     
     # Determine focus cell (the cell we are patching)
     if mode == "APPEND":
         focus_idx = max(0, len(cells) - 1)
@@ -1934,13 +2174,24 @@ def llm_implement_step(
     cellX_src = picked.get(focus_idx, "")
     cellX_meta = _extract_cell_meta_from_cell00(cell00_src, cell_index=focus_idx)
 
-
+    # ---------------------------------------------------------
+    # ✅ NEW: runtime upstream facts injected by one_loop (optional)
+    # ---------------------------------------------------------
+    runtime_cp = _extract_runtime_context_pack(target)
+    upstream_ctx_text = _build_upstream_context_text(runtime_cp=runtime_cp, max_chars=9000)
+ 
     # Pull last_error injected by one_loop.py (if any)
     run_evidence = target.get("run_evidence") if isinstance(target.get("run_evidence"), dict) else {}
     last_error = run_evidence.get("last_error") if isinstance(run_evidence, dict) else {}
     if not isinstance(last_error, dict):
         last_error = {}
 
+    # ✅ FIX MODE hint from one_loop.py (optional)
+    hint = target.get("hint") if isinstance(target.get("hint"), dict) else {}
+    fix_mode = bool(hint.get("fix_mode")) if isinstance(hint, dict) else False
+    freeze_structure = bool(hint.get("freeze_structure")) if isinstance(hint, dict) else False
+    tb_is_compressed = bool(last_error.get("traceback_is_compressed"))
+ 
     failing_cell_index = last_error.get("failing_cell_index")
     executed_up_to = last_error.get("executed_up_to")
     tb = last_error.get("traceback")
@@ -1962,7 +2213,7 @@ def llm_implement_step(
 
     if not schema_snapshot:
         try:
-            injected = (target.get("context_pack") or {}).get("schema_snapshot")
+            injected = (runtime_cp or {}).get("schema_snapshot")
             if isinstance(injected, dict):
                 schema_snapshot = dict(injected)
         except Exception:
@@ -1987,12 +2238,36 @@ def llm_implement_step(
         "- HARD BAN: `import src.notion.repos as repos` is forbidden.\n"
         "- HARD BAN: `from src.notion import repos` is forbidden.\n"
         "CRITICAL:\n"
-        "- You MUST rely on Cell00 policy/structure and Cell01 wiring.\n"
-        "- Do not invent new setup; reuse what Cell01 provides.\n"
+         "- You MUST rely on Cell00 policy/structure and Cell01 wiring.\n"
+         "- Do not invent new setup; reuse what Cell01 provides.\n"
+         "\n"
+         "Repo wiring reality check:\n"
+         "- DO NOT assume a `repos` dict exists in the notebook.\n"
+         "- Use these variables from Cell01 (BaseRepo instances):\n"
+         "  papers_repo, events_repo, rq_repo, weekly_target_update_repo\n"
+         "- Use `repo_query(repo, ...)` for reads.\n"
         "- Do not change other cells; output only the target cell patch.\n"
-
+        "\n"
+        "CONSISTENCY RULES (critical):\n"
+        "- Reuse variable names that already exist upstream.\n"
+        "- If UPSTREAM CONTEXT provides available_symbols, ONLY reference names from it (unless defining a new name intentionally).\n"
     )
 
+    # ✅ Stronger constraints in FIX mode (Option A)
+    if fix_mode:
+        system += (
+            "\n"
+            "FIX MODE (after runtime failure):\n"
+            "- Your job is to make the failing cell run, with MINIMAL changes.\n"
+            "- DO NOT refactor broadly. DO NOT rename upstream variables.\n"
+            "- Keep the cell's I/O contract stable (inputs/outputs names must remain consistent).\n"
+            "- Prefer adding small guards (type checks, safe accessors) over changing data flow.\n"
+        )
+        if freeze_structure:
+            system += "- STRUCTURE IS FROZEN: do NOT propose new cells, do NOT change cell roles.\n"
+        if tb_is_compressed:
+            system += "- Traceback is compressed to the actionable part; focus on the exception type/message and fix that precisely.\n"
+ 
     context_pack = _build_context_pack_5(
         task_objective_constraints="(Planner context omitted in implement step)",
         structure_payload={"kind": "IMPLEMENT_VIEW", "items": []},
@@ -2003,6 +2278,7 @@ def llm_implement_step(
     user = (
         "CONTEXT_PACK (5 points, fixed):\n"
         f"{_safe_json_dump(context_pack, max_chars=7000)}\n\n"
+        f"{upstream_ctx_text}"
         "PLAN STEP (what to build/fix):\n"
         f"{_safe_json_dump(plan_step)}\n\n"
         "GLOBAL CONTEXT (MUST READ): Cell00 (policy/structure) and Cell01 (setup/wiring)\n"
@@ -2025,13 +2301,49 @@ def llm_implement_step(
         "- You must implement/fix ONLY the target cell (the plan_step.cell_index).\n"
         "- First, infer the root cause from traceback + current cell source.\n"
         "- Then produce corrected executable code for CellX that matches the role in Cell00 and uses the wiring from Cell01.\n"
+        "- IMPORTANT: Keep names consistent with upstream_sources / available_symbols if provided.\n"
+        "- In FIX MODE: do the smallest possible patch that makes the cell execute successfully.\n"
         "- Keep changes minimal and localized.\n"
         "- Output JSON must include: mode, cell_type, new_source.\n"
         "- If plan_step.mode is REPLACE, you must patch that cell_index.\n"
         "- Do NOT output null for integers; omit the key instead.\n"
         "- Notebook policy: DO NOT use build_repos().\n"
+        "- IMPORTANT: Do NOT reference a `repos` dict. Use papers_repo/events_repo/rq_repo/weekly_target_update_repo.\n"
+
     )
 
+    # -----------------------------
+    # Trace: request (LLM_IMPLEMENT)
+    # -----------------------------
+    try:
+        append_llm_trace(
+            project_root=_trace_root,
+            run_id=str(proposal_page_id),
+            event={
+                "ts": _now_iso(),
+                "group": _trace_group,
+                "step_type": "LLM_IMPLEMENT",
+                "task_item_id": str(task_item_id),
+                "task_page_id": str(task_page_id),
+                "proposal_page_id": str(proposal_page_id),
+                "notebook_path": str(notebook_path),
+                "model": str(model),
+                "request": {
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                    "json_schema_name": str(IMPLEMENT_JSON_SCHEMA.get("name") or ""),
+                    "temperature": float(temperature),
+                    "max_tokens": int(max_tokens),
+                },
+                "meta": {
+                    "focus_cell_index": int(focus_idx),
+                    "plan_step": plan_step,
+                    "upstream_ctx_included": bool(upstream_ctx_text.strip()),
+                },
+            },
+        )
+    except Exception:
+        pass
 
     try:
         res = claude.call_json(
@@ -2043,8 +2355,53 @@ def llm_implement_step(
             json_schema=IMPLEMENT_JSON_SCHEMA,
         )
     except ClaudeStructuredOutputError as e:
+
+        # Trace: error
+        try:
+            append_llm_trace(
+                project_root=_trace_root,
+                run_id=str(proposal_page_id),
+                event={
+                    "ts": _now_iso(),
+                    "group": _trace_group,
+                    "step_type": "LLM_IMPLEMENT_ERROR",
+                    "task_item_id": str(task_item_id),
+                    "task_page_id": str(task_page_id),
+                    "proposal_page_id": str(proposal_page_id),
+                    "notebook_path": str(notebook_path),
+                    "model": str(model),
+                    "error": {"type": type(e).__name__, "message": str(e)},
+                },
+            )
+        except Exception:
+            pass
         mark_failed(store, task_item_id=task_item_id, reason=f"LLM_IMPLEMENT JSON error: {e}")
         return {"ok": False, "message": f"LLM_IMPLEMENT JSON error: {e}"}
+
+ 
+    # Trace: response (LLM_IMPLEMENT_RESULT)
+    try:
+        append_llm_trace(
+            project_root=_trace_root,
+            run_id=str(proposal_page_id),
+            event={
+                "ts": _now_iso(),
+                "group": _trace_group,
+                "step_type": "LLM_IMPLEMENT_RESULT",
+                "task_item_id": str(task_item_id),
+                "task_page_id": str(task_page_id),
+                "proposal_page_id": str(proposal_page_id),
+                "notebook_path": str(notebook_path),
+                "model": str(model),
+                "response": {
+                    "parsed_json": (res.parsed_json or {}),
+                    "usage": getattr(res.usage, "__dict__", res.usage),
+                },
+            },
+        )
+    except Exception:
+        pass
+        
 
     out = res.parsed_json or {}
     out_mode = str(out.get("mode") or mode).upper()
@@ -2079,7 +2436,31 @@ def llm_implement_step(
             reason="LLM_IMPLEMENT produced build_repos() which is forbidden in notebook patches (BaseRepo-only policy).",
         )
         return {"ok": False, "message": "LLM output violates notebook policy: build_repos() is forbidden."}
-
+     # -------------------------
+     # Hard correctness guard: do NOT assume `repos` dict exists (Cell01 uses individual repo vars)
+     # -------------------------
+    banned_repos_dict_patterns = [
+        "repos[",
+        "repos.get(",
+        "if 'repos' in dir()",
+        "if \"repos\" in dir()",
+        "if 'repos' not in dir()",
+        "if \"repos\" not in dir()",
+        "REQUIRED_REPO_KEYS",
+    ]
+    hits = [p for p in banned_repos_dict_patterns if p in new_code]
+    if hits:
+        mark_failed(
+            store,
+            task_item_id=task_item_id,
+            reason=f"LLM_IMPLEMENT referenced a `repos` dict pattern which is not part of Cell01 wiring: {hits}",
+        )
+        return {
+            "ok": False,
+            "message": f"LLM output violates notebook wiring: do not reference `repos` dict. Use papers_repo/events_repo/rq_repo/weekly_target_update_repo. hits={hits}",
+        }
+ 
+    
     # Additional guard: forbid common wrong imports around repos module
     banned_snippets = [
         "from src.notion import repos",

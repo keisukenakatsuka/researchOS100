@@ -89,6 +89,7 @@ This loop will:
 """
 
 from __future__ import annotations
+import ast
 import re
 import hashlib
 import nbformat
@@ -142,6 +143,195 @@ from src.verify.error_parser import (
     suggest_next_action_from_quality_gate,
 )
 
+def _trim_text(s: Any, n: int = 8000) -> str:
+    t = "" if s is None else str(s)
+    if len(t) <= n:
+        return t
+    return t[:n] + "\n…(truncated)"
+
+def _extract_cell_facts_from_source(source: str) -> Dict[str, Any]:
+    """
+    Best-effort AST extraction for "cell facts" to reduce downstream NameError / contract drift.
+    Returns:
+      - defined_symbols: list[str]
+      - imports: list[str]
+    """
+    out: Dict[str, Any] = {"defined_symbols": [], "imports": []}
+    src = str(source or "")
+    if not src.strip():
+        return out
+
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        # If parse fails (magics, incomplete code), keep it empty (best-effort).
+        return out
+
+    defined: set[str] = set()
+    imports: set[str] = set()
+
+    for node in ast.walk(tree):
+        # defs
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if getattr(node, "name", None):
+                defined.add(str(node.name))
+        # assignments
+        elif isinstance(node, ast.Assign):
+            for t in node.targets or []:
+                if isinstance(t, ast.Name) and t.id:
+                    defined.add(str(t.id))
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for elt in t.elts:
+                        if isinstance(elt, ast.Name) and elt.id:
+                            defined.add(str(elt.id))
+        elif isinstance(node, ast.AnnAssign):
+            t = node.target
+            if isinstance(t, ast.Name) and t.id:
+                defined.add(str(t.id))
+        # imports
+        elif isinstance(node, ast.Import):
+            for a in node.names or []:
+                if a and getattr(a, "name", None):
+                    imports.add(str(a.name))
+        elif isinstance(node, ast.ImportFrom):
+            mod = getattr(node, "module", None)
+            if mod:
+                imports.add(str(mod))
+
+    out["defined_symbols"] = sorted(defined)
+    out["imports"] = sorted(imports)
+    return out
+
+def _get_upstream_sources(
+    *,
+    notebook_path: str,
+    target_cell_index: int,
+    window: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    Returns a small window of upstream sources for LLM context.
+    (target-1, target-2, ...) up to `window` cells.
+    """
+    try:
+        nb_path = Path(str(notebook_path)).expanduser().resolve()
+        if not nb_path.exists():
+            return []
+        nb = nbformat.read(str(nb_path), as_version=4)
+        out: List[Dict[str, Any]] = []
+        start = max(0, int(target_cell_index) - int(window))
+        end = max(0, int(target_cell_index))
+        for i in range(start, end):
+            if i < 0 or i >= len(nb.cells):
+                continue
+            src = str(nb.cells[i].get("source") or "")
+            if not src.strip():
+                continue
+            out.append({"cell_index": i, "source": _trim_text(src, 8000)})
+        return out
+    except Exception:
+        return []
+
+def _update_cell_memory(
+    *,
+    store: StateStore,
+    proposal_page_id: str,
+    notebook_path: str,
+    cell_indices: List[int],
+    artifacts_dir: Optional[str] = None,
+    snapshot_up_to: Optional[int] = None,
+) -> None:
+    """
+    Persist "cell facts" into state so downstream LLM steps have stable upstream reality.
+    Also optionally emits an artifacts snapshot:
+      <artifacts_dir>/context/cell_facts_up_to_{N}.json
+    """
+    try:
+        pid = str(proposal_page_id or "")
+        if not pid:
+            return
+
+        nb_path = Path(str(notebook_path)).expanduser().resolve()
+        if not nb_path.exists():
+            return
+        nb = nbformat.read(str(nb_path), as_version=4)
+
+        # materialize facts
+        per_cell: Dict[str, Any] = {}
+        for idx in sorted({int(x) for x in (cell_indices or []) if x is not None}):
+            if idx < 0 or idx >= len(nb.cells):
+                continue
+            src = str(nb.cells[idx].get("source") or "")
+            facts = _extract_cell_facts_from_source(src)
+            per_cell[str(idx)] = {
+                **facts,
+                "cell_index": idx,
+                "updated_at": _now_iso_jst(),
+            }
+
+        if not per_cell:
+            return
+
+        # write to state (merge)
+        def _fn(st: Dict[str, Any]) -> Dict[str, Any]:
+            cm = st.setdefault("cell_memory", {})
+            rec = cm.setdefault(pid, {})
+            # merge per-cell
+            for k, v in per_cell.items():
+                rec[k] = v
+
+            # compute union (available symbols) for convenience
+            union: set[str] = set()
+            for v in rec.values():
+                if isinstance(v, dict):
+                    for name in (v.get("defined_symbols") or []):
+                        if name:
+                            union.add(str(name))
+
+            st.setdefault("cell_memory_union", {})
+            st["cell_memory_union"][pid] = sorted(union)
+
+            # keep latest pointer
+            st.setdefault("cell_memory_latest", {})
+            st["cell_memory_latest"][pid] = {
+                "proposal_page_id": pid,
+                "notebook_path": str(notebook_path),
+                "updated_at": _now_iso_jst(),
+                "known_cells": sorted([int(x) for x in rec.keys() if str(x).isdigit()]),
+            }
+            st["cell_memory"] = cm
+            return st
+
+        _store_update_state(store, _fn)
+
+        # optional artifacts snapshot (debuggable + size control)
+        if artifacts_dir and snapshot_up_to is not None:
+            base = Path(str(artifacts_dir))
+            out_dir = base / "context"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            st_now = _state_get(store)
+            mem = (st_now.get("cell_memory") or {}).get(pid, {}) if isinstance(st_now, dict) else {}
+            union = (st_now.get("cell_memory_union") or {}).get(pid, []) if isinstance(st_now, dict) else []
+            snap = {
+                "proposal_page_id": pid,
+                "notebook_path": str(notebook_path),
+                "snapshot_up_to": int(snapshot_up_to),
+                "available_symbols": union,
+                "cells": {k: v for k, v in mem.items() if str(k).isdigit() and int(k) <= int(snapshot_up_to)},
+                "updated_at": _now_iso_jst(),
+            }
+            p = out_dir / f"cell_facts_up_to_{int(snapshot_up_to):02d}.json"
+            p.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            # store the latest snapshot path for LLM steps
+            def _fn2(st: Dict[str, Any]) -> Dict[str, Any]:
+                st.setdefault("cell_facts_snapshot_path", {})
+                st["cell_facts_snapshot_path"][pid] = str(p)
+                return st
+            _store_update_state(store, _fn2)
+
+    except Exception:
+        return
 
 def _get_plan_seed_structure(st: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -349,12 +539,15 @@ def _step_apply_patch(
     )
     bump_metric(store, "patch_count", 1)
     mark_done(store, task_item_id=task_item_id)
-    # ✅ DEBUG: print Structure immediately after scaffolding (so it appears early in logs)
-    _debug_dump_structure_from_notebook(
-        notebook_path=str(nb_path),
-        artifacts_dir=str(art.base_dir),
-        prefix="[STRUCTURE][AFTER_SCAFFOLD]",
-    )
+    # ✅ DEBUG: print Structure immediately after patch (optional)
+#    try:
+#        _debug_dump_structure_from_notebook(
+#            notebook_path=str(notebook_path),
+#            artifacts_dir=str(getattr(artifacts, "base_dir", "")),
+#            prefix="[STRUCTURE][AFTER_PATCH]",
+#        )
+#    except Exception:
+#        pass
 
     
     # ✅ NEW: persist last_patch (for loop detection & audit)
@@ -377,6 +570,20 @@ def _step_apply_patch(
 
     _store_update_state(store, _fn)
 
+    # ✅ NEW: update cell_memory for this cell (best-effort)
+    try:
+        pid = str(target.get("proposal_page_id") or "")
+        if pid and notebook_path and cell_index is not None:
+            _update_cell_memory(
+                store=store,
+                proposal_page_id=pid,
+                notebook_path=str(notebook_path),
+                cell_indices=[int(cell_index)],
+                artifacts_dir=str(getattr(artifacts, "base_dir", "")) if hasattr(artifacts, "base_dir") else None,
+                snapshot_up_to=int(cell_index),
+            )
+    except Exception:
+        pass
     return LoopResult(
         did_work=True,
         task_item_id=task_item_id,
@@ -557,7 +764,15 @@ def _write_last_error_from_verify(
         le = st.get("last_error")
         if not isinstance(le, dict):
             le = {}
-        le["traceback"] = nb_fields.get("traceback", "") or le.get("traceback", "")
+         # IMPORTANT: avoid null/None propagation for optional integer fields
+        if "failing_cell_index" in le and le.get("failing_cell_index") is None:
+            le.pop("failing_cell_index", None)
+        if "executed_up_to" in le and le.get("executed_up_to") is None:
+            le.pop("executed_up_to", None)
+ 
+        tb = nb_fields.get("traceback", "")
+        if tb:
+            le["traceback"] = tb
         le["category"] = category
         le["next_action"] = next_action
         if isinstance(extracted, dict):
@@ -674,12 +889,16 @@ def _advance_executed_up_to_on_prefix_pass(
         le["has_error"] = False
         le["error_summary"] = ""          # clear
         le["traceback"] = ""              # clear
-        le["failing_cell_index"] = None   # clear
         le["run_mode"] = "PREFIX"
         le["executed_up_to"] = next_up_to
         le["notebook_path"] = str(notebook_path)
         le["proposal_page_id"] = str(proposal_page_id)
         le["updated_at"] = _now_iso_jst()
+ 
+         # IMPORTANT: do NOT keep optional int keys with None (Claude schema compatibility)
+         # (If present from a prior failure, remove it to avoid null propagation.)
+        if "failing_cell_index" in le and le.get("failing_cell_index") is None:
+            le.pop("failing_cell_index", None)
         st["last_error"] = le
 
         # ---- mirror progress per proposal (optional but useful) ----
@@ -775,13 +994,40 @@ def _save_schema_cache_from_artifacts(
     """
     try:
         base = Path(str(artifacts_dir))
-        p = base / "schema" / "schema_snapshot.json"
-        if not p.exists():
-            p2 = base / "schema_snapshot.json"
-            if p2.exists():
-                p = p2
-            else:
-                return None
+
+        # 1) run artifacts (preferred)
+        candidates: List[Path] = [
+            base / "schema" / "schema_snapshot.json",
+            base / "schema_snapshot.json",
+        ]
+
+        # 2) global artifacts fallback:
+        # try to locate <project_root>/artifacts/schema/schema_snapshot.json
+        # by walking up from notebook_path and/or artifacts_dir.
+        def _find_project_root(start: Path, max_up: int = 10) -> Optional[Path]:
+            cur = start
+            for _ in range(max_up):
+                if (cur / "src").is_dir() and (cur / "artifacts").is_dir():
+                    return cur
+                if cur.parent == cur:
+                    break
+                cur = cur.parent
+            return None
+
+        nbp = Path(str(notebook_path)).expanduser().resolve()
+        root = _find_project_root(nbp.parent) or _find_project_root(base)
+        if root:
+            candidates.extend(
+                [
+                    root / "artifacts" / "schema" / "schema_snapshot.json",
+                    root / "artifacts" / "schema_snapshot.json",
+                ]
+            )
+
+        p = next((c for c in candidates if c.exists()), None)
+        if p is None:
+            return None
+ 
 
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
@@ -794,9 +1040,11 @@ def _save_schema_cache_from_artifacts(
             key = str(proposal_page_id) if proposal_page_id else str(notebook_path)
             cache[key] = {
                 "schema_snapshot": data,
-                "artifacts_path": str(base),
+                # store where we actually read it from
+                "artifacts_path": str(p.parent),
                 "notebook_path": str(notebook_path),
                 "updated_at": _now_iso_jst(),
+                "schema_path": str(p),
             }
             st["schema_cache"] = cache
             st["schema_cache_latest"] = cache[key]
@@ -813,6 +1061,7 @@ def _inject_context_pack_into_target(store: StateStore, target: Dict[str, Any]) 
     Minimal context pack injector:
       - last_error (summary + traceback + indices)
       - latest schema snapshot (from state)
+      - upstream cell facts + upstream sources (best-effort)
     """
     try:
         st = _state_get(store)
@@ -830,16 +1079,71 @@ def _inject_context_pack_into_target(store: StateStore, target: Dict[str, Any]) 
         if isinstance(le, dict) and le:
             cp.setdefault("last_error", {})
             if isinstance(cp["last_error"], dict):
-                cp["last_error"].setdefault("failing_cell_index", le.get("failing_cell_index"))
-                cp["last_error"].setdefault("error_summary", le.get("error_summary"))
-                cp["last_error"].setdefault("traceback", le.get("traceback"))
-                cp["last_error"].setdefault("executed_up_to", le.get("executed_up_to"))
-                cp["last_error"].setdefault("run_mode", le.get("run_mode"))
-                cp["last_error"].setdefault("run_page_id", le.get("run_page_id"))
-                cp["last_error"].setdefault("artifacts_path", le.get("artifacts_path"))
+                 # IMPORTANT: avoid emitting null/None for optional integer fields
+                 fci = le.get("failing_cell_index")
+                 if fci is not None:
+                     cp["last_error"].setdefault("failing_cell_index", fci)
+                 eu = le.get("executed_up_to")
+                 if eu is not None:
+                     cp["last_error"].setdefault("executed_up_to", eu)
+                 es = le.get("error_summary")
+                 if es:
+                     cp["last_error"].setdefault("error_summary", es)
+                 tb = le.get("traceback")
+                 if tb:
+                     cp["last_error"].setdefault("traceback", tb)
+                 rm = le.get("run_mode")
+                 if rm:
+                     cp["last_error"].setdefault("run_mode", rm)
+                 rpid = le.get("run_page_id")
+                 if rpid:
+                     cp["last_error"].setdefault("run_page_id", rpid)
+                 ap = le.get("artifacts_path")
+                 if ap:
+                     cp["last_error"].setdefault("artifacts_path", ap)
 
         if isinstance(latest, dict) and latest.get("schema_snapshot"):
             cp.setdefault("schema_snapshot", latest.get("schema_snapshot"))
+
+        # ---- NEW: cell facts memory (proposal-scoped) ----
+        pid = str(target.get("proposal_page_id") or "")
+        if pid:
+            union = (st.get("cell_memory_union") or {}).get(pid, []) if isinstance(st.get("cell_memory_union"), dict) else []
+            if isinstance(union, list) and union:
+                cp.setdefault("available_symbols", union)
+
+            # keep short tail (latest 2 cells by index)
+            mem = (st.get("cell_memory") or {}).get(pid, {}) if isinstance(st.get("cell_memory"), dict) else {}
+            if isinstance(mem, dict) and mem:
+                keys = []
+                for k in mem.keys():
+                    try:
+                        keys.append(int(k))
+                    except Exception:
+                        pass
+                keys.sort()
+                tail = [str(k) for k in keys[-2:]] if keys else []
+                tail_payload = [mem.get(k) for k in tail if isinstance(mem.get(k), dict)]
+                if tail_payload:
+                    cp.setdefault("cell_facts_tail", tail_payload)
+
+            # optional pointer to artifacts snapshot (debug / audit)
+            snap_map = st.get("cell_facts_snapshot_path") if isinstance(st.get("cell_facts_snapshot_path"), dict) else {}
+            snap_path = snap_map.get(pid) if isinstance(snap_map, dict) else None
+            if snap_path:
+                cp.setdefault("cell_facts_path", str(snap_path))
+
+        # ---- NEW: upstream sources (target cell - 1..2) ----
+        nbp = str(target.get("notebook_path") or "")
+        ci = target.get("cell_index")
+        try:
+            ci_i = int(ci) if ci is not None else None
+        except Exception:
+            ci_i = None
+        if nbp and ci_i is not None and ci_i > 0:
+            ups = _get_upstream_sources(notebook_path=nbp, target_cell_index=ci_i, window=2)
+            if ups:
+                cp.setdefault("upstream_sources", ups)            
     except Exception:
         return
 
@@ -1102,35 +1406,9 @@ def run_one_step(
             mark_failed(store, task_item_id=task_item_id, reason=err)
             return LoopResult(did_work=True, task_item_id=task_item_id, step_type=str(step_type), ok=False, message=f"Exception in {step_type}: {err}")
 
-    # =========================
-    # ✅ NEW: Always inject last_error into LLM_IMPLEMENT target
-    # =========================
-    if str(step_type).upper() == "LLM_IMPLEMENT":
-        try:
-            st_now = store.load() if hasattr(store, "load") else {}
-            le = (st_now.get("last_error") or {}) if isinstance(st_now, dict) else {}
-            if isinstance(le, dict) and le.get("has_error"):
-                tb0 = str(le.get("traceback", "") or "")
-                tb_min = _extract_actionable_traceback(tb0)
-    
-                target.setdefault("run_evidence", {})
-                if isinstance(target["run_evidence"], dict):
-                    target["run_evidence"].setdefault("last_error", {})
-                    if isinstance(target["run_evidence"]["last_error"], dict):
-                        target["run_evidence"]["last_error"]["error_summary"] = le.get("error_summary", "")
-                        target["run_evidence"]["last_error"]["failing_cell_index"] = le.get("failing_cell_index", None)
-                        target["run_evidence"]["last_error"]["traceback"] = tb_min
-                        target["run_evidence"]["last_error"]["executed_up_to"] = le.get("executed_up_to", None)
-                        target["run_evidence"]["last_error"]["run_mode"] = le.get("run_mode", "")
-                        target["run_evidence"]["last_error"]["run_page_id"] = le.get("run_page_id", "")
-                        target["run_evidence"]["last_error"]["artifacts_path"] = le.get("artifacts_path", "")
-    
-                target.setdefault("failing_cell_index", le.get("failing_cell_index", None))
-                target.setdefault("executed_up_to", le.get("executed_up_to", None))
-                target.setdefault("traceback", tb_min)
-        except Exception:
-            pass
-
+    # NOTE:
+    # LLM_IMPLEMENT is already handled by the dispatcher above and context injection is centralized
+    # in _inject_context_pack_into_target(). Keep all "what to pass to LLM" logic there.
 
 
     # =========================
@@ -2160,41 +2438,87 @@ def _step_verify_notebook(
             bump_metric(store, "queue_cancelled_by_replan", cancelled_n)
 
             llm_cfg = dict(target.get("llm") or {})
-            planner_target = {
-                "task_page_id": str(task_page_id),
-                "proposal_page_id": str(proposal_page_id),
-                "notebook_path": str(notebook_path),
-                "run_evidence": {
-                    "last_error": {
-                        "category": category,
-                        "next_action": next_action,
-                        "error_summary": err_sum,
-                        "cell_index": rep_cell_index,
-                        "run_page_id": str(run_page_id),
-                        "artifacts_path": str(art.base_dir),
-                        "extracted": getattr(rep, "extracted", {}),
-                        "traceback": actionable_tb,
-                    }
-                },
-                "hint": {
-                    "target_cell_index": rep_cell_index,
-                    "run_mode": run_mode,
-                    "up_to_cell_index": up_to_for_sig,
-                },
-                "llm": llm_cfg,
+
+            # ------------------------------------------------------------------
+            # ✅ FIX MODE (Option A + D)
+            # - If we know the failing cell (>=Cell03), skip re-PLANNING and
+            #   enqueue a minimal LLM_IMPLEMENT for that cell only.
+            # - Otherwise fall back to LLM_PLAN (rare: structural issues).
+            # ------------------------------------------------------------------
+            evidence_last_error = {
+                "category": category,
+                "next_action": next_action,
+                "error_summary": err_sum,
+                "cell_index": rep_cell_index,
+                "run_page_id": str(run_page_id),
+                "artifacts_path": str(art.base_dir),
+                "extracted": getattr(rep, "extracted", {}) if rep is not None else {},
+                "traceback": actionable_tb,
+                "traceback_is_compressed": True,
             }
 
-            enqueue(
-                store,
-                new_task_item(
-                    type="LLM_PLAN",
-                    intent=f"Replan after VERIFY_NOTEBOOK failure ({category}): {next_action}",
-                    assignee="PLANNER",
-                    priority=int(target.get("replan_priority") or 95),
-                    target=planner_target,
-                ),
-            )
-            bump_metric(store, "llm_replan_enqueued", 1)
+            try:
+                cell_i = int(rep_cell_index) if rep_cell_index is not None else None
+            except Exception:
+                cell_i = None
+
+            if cell_i is not None and cell_i >= 3:
+                # Fix ONLY the failing cell, keep STRUCTURE frozen.
+                implement_target = {
+                    "task_page_id": str(task_page_id),
+                    "proposal_page_id": str(proposal_page_id),
+                    "notebook_path": str(notebook_path),
+                    "cell_index": int(cell_i),
+                    "run_evidence": {"last_error": evidence_last_error},
+                    "hint": {
+                        "phase": "FIX_AFTER_VERIFY",
+                        "fix_mode": True,
+                        "freeze_structure": True,
+                        "target_cell_index": int(cell_i),
+                        "run_mode": run_mode,
+                        "up_to_cell_index": up_to_for_sig,
+                    },
+                    "llm": llm_cfg,
+                }
+
+                enqueue(
+                    store,
+                    new_task_item(
+                        type="LLM_IMPLEMENT",
+                        intent=f"Fix failing cell after VERIFY_NOTEBOOK failure (cell={cell_i}, {category}). Minimal patch only.",
+                        assignee="IMPLEMENTER",
+                        priority=int(target.get("replan_priority") or 95),
+                        target=implement_target,
+                    ),
+                )
+                bump_metric(store, "llm_fix_enqueued", 1)
+
+            else:
+                # Fallback: we don't know the failing cell or it's in bootstrap cells.
+                planner_target = {
+                    "task_page_id": str(task_page_id),
+                    "proposal_page_id": str(proposal_page_id),
+                    "notebook_path": str(notebook_path),
+                    "run_evidence": {"last_error": evidence_last_error},
+                    "hint": {
+                        "target_cell_index": rep_cell_index,
+                        "run_mode": run_mode,
+                        "up_to_cell_index": up_to_for_sig,
+                    },
+                    "llm": llm_cfg,
+                }
+
+                enqueue(
+                    store,
+                    new_task_item(
+                        type="LLM_PLAN",
+                        intent=f"Replan after VERIFY_NOTEBOOK failure ({category}): {next_action}",
+                        assignee="PLANNER",
+                        priority=int(target.get("replan_priority") or 95),
+                        target=planner_target,
+                    ),
+                )
+                bump_metric(store, "llm_replan_enqueued", 1)
         else:
             # Debounced / capped: record that we're stopping auto-replans for this signature
             bump_metric(store, "llm_replan_suppressed", 1)
@@ -2251,6 +2575,24 @@ def _step_verify_notebook(
         except Exception:
             pass
 
+        # ✅ NEW: capture "cell facts" up to this verified boundary (best-effort)
+        try:
+            # record Cell03+ (and also 0..2 is harmless; but keep scope small)
+            start = 0
+            end = int(up_to_for_sig)
+            # if you want strictly Cell03+, set start=3; keeping 0..end is often useful for debugging
+            idxs = list(range(start, end + 1))
+            _update_cell_memory(
+                store=store,
+                proposal_page_id=str(proposal_page_id),
+                notebook_path=str(nb_path),
+                cell_indices=idxs,
+                artifacts_dir=str(art.base_dir),
+                snapshot_up_to=int(up_to_for_sig),
+            )
+        except Exception:
+            pass
+ 
     # ✅ after PREFIX pass bookkeeping (bootstrap verify pass only)
     if str(run_mode).upper() == "PREFIX" and up_to_for_sig is not None and int(up_to_for_sig) >= 2:
         try:

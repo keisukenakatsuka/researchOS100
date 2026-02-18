@@ -224,6 +224,71 @@ class NotionClient:
             body["archived"] = archived
         return self._request("PATCH", f"/pages/{page_id}", json_body=body)
 
+    # ---- public convenience (notebook-compatible, LEGACY) ----
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        json: Optional[dict] = None,
+        debug: bool = False,
+    ) -> dict:
+        """Low-level HTTP call — **legacy bridge, do not use in new code**.
+
+        This method exists solely so that pre-refactor notebook cells
+        (e.g. Cell 03 of 040_weekly_papers_review) keep working after
+        the migration to the shared client.
+
+        For **new** code, prefer the typed helpers instead::
+
+            # Good — typed, validates IDs, handles pagination:
+            client.get_database(database_id=db_id)
+            client.query_data_source(data_source_id=ds_id, ...)
+            client.update_page(page_id=pid, properties={...})
+
+            # Avoid — untyped, no ID validation, no autopagination:
+            client.request("GET", f"/databases/{db_id}")
+
+        Parameters
+        ----------
+        method : str
+            HTTP method (``GET``, ``POST``, ``PATCH``, ``DELETE``).
+        path : str
+            Notion API path **without** base URL, e.g. ``/databases/{id}``.
+        json : dict, optional
+            JSON body for ``POST`` / ``PATCH`` requests.
+        debug : bool, optional
+            If ``True``, print request URL, body (truncated), and the first
+            400 chars of the response to stdout.
+
+        Returns
+        -------
+        dict
+            Parsed JSON response from the Notion API.
+
+        .. deprecated::
+            Will be removed once all notebook cells migrate to typed helpers.
+        """
+        import json as json_mod
+        import warnings
+
+        warnings.warn(
+            "NotionClient.request() is a legacy bridge. "
+            "Prefer typed helpers (get_database, query_data_source, update_page, …).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        result = self._request(method, path, json_body=json)
+        if debug:
+            url = self.config.base_url.rstrip("/") + path
+            print(f"\n[HTTP DEBUG] {method} {url}")
+            if json:
+                print(f"[HTTP DEBUG] body={json_mod.dumps(json, ensure_ascii=False)[:400]}")
+            text = json_mod.dumps(result, ensure_ascii=False) if result else ""
+            print(f"[HTTP DEBUG] response (first 400): {text[:400]}")
+        return result
+
     # ---- internal ----
 
     def _request(self, method: str, path: str, json_body: Optional[dict] = None) -> dict:
@@ -394,6 +459,14 @@ class NotionDataSourceResolver:
                 seen.add(u)
                 candidates.append(u)
 
+        # Skip database_id itself — it is never a valid data_source_id
+        # and probing it always returns 404, creating noisy logs.
+        candidates = [c for c in candidates if c != db_id]
+
+        # Safety cap to avoid too many probe queries
+        if len(candidates) > 200:
+            candidates = candidates[:200]
+
         # Validate candidates by attempting a tiny data_sources query
         for cand in candidates:
             try:
@@ -408,9 +481,6 @@ class NotionDataSourceResolver:
                 return resolved
             except NotionAPIError:
                 continue
-        # Safety cap to avoid too many probe queries
-        if len(candidates) > 200:
-            candidates = candidates[:200]
 
         raise NotionAPIError(
             f"Failed to resolve data_source_id for database_id={db_id}. "

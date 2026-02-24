@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # src/scripts/049_weekly_rq_status.py
-"""Weekly RQ status — fetch RQs, link evidence via LLM, surface gaps.
+"""Weekly RQ revision proposals — categorized, contextual, in Japanese.
 
 Pipeline:
 1. Fetch all Research Questions from Notion
 2. Load this week's papers (047) and events (048) output JSON
-3. LLM-enhanced evidence linking per RQ
-4. Generate per-RQ update proposals with gap/approach suggestions
-5. Write proposals to WEEKLY_RQ_UPDATE_DB
+3. LLM generates categorized revision proposals per RQ (in Japanese)
+4. Each revision becomes a separate Notion page in WEEKLY_RQ_UPDATE_DB
+5. Categories: "Rationale / Background", "Gap Identified", "Proposed Approach"
 
 LLM is mandatory. Write-back is default (use --no-write for debug).
 
@@ -22,11 +22,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
@@ -47,7 +46,6 @@ from src.notion import (
     build_notion_client_from_env,
 )
 from src.notion.rq_normalize import filter_rqs, normalize_rqs
-from src.notion.rq_schema import RQ_ALL_PROPERTIES
 from src.notion.truncation import TruncationTracker
 from src.notion.weekly_updates_repo import WeeklyRQUpdateRepo
 
@@ -56,54 +54,84 @@ logger = logging.getLogger("049_weekly_rq_status")
 SCRIPT_NAME = "049_weekly_rq_status"
 
 # ================================================================
-# LLM evidence linking
+# LLM revision proposal generation
 # ================================================================
 
-RQ_EVIDENCE_SYSTEM_PROMPT = """\
-You are a research intelligence analyst specialising in startup ecosystems, \
-venture capital dynamics, and entrepreneurship policy.
+RQ_REVISION_SYSTEM_PROMPT = """\
+あなたはスタートアップエコシステム、ベンチャーキャピタルの動態、起業政策に\
+特化した研究インテリジェンスアナリストです。
 
-For each Research Question, identify which papers and events from this week \
-are relevant.  For each RQ, return:
-- linked_paper_indices: indices of relevant papers (from the papers list)
-- linked_event_indices: indices of relevant events (from the events list)
-- update_summary: 1-2 sentences on what this week's evidence means for the RQ
-- suggested_gap_update: if the evidence fills a gap, suggest updated gap text (or empty)
-- suggested_approach_update: if the evidence suggests a method change (or empty)
-- confidence: 0.0-1.0 confidence that evidence is meaningfully relevant
+各Research Question (RQ) について、今週の論文とイベントを分析し、\
+具体的な改訂提案を生成してください。
 
-Return a JSON object:
+各RQには以下の情報が含まれています:
+- title: RQのタイトル
+- rationale: 背景・根拠
+- gap: 特定されたギャップ
+- approach: 提案されたアプローチ
+
+各RQについて、具体的な修正が必要な箇所を特定し、以下のカテゴリで\
+改訂提案を作成してください:
+
+カテゴリ:
+1. "Rationale / Background" — 背景・根拠の修正
+2. "Gap Identified" — ギャップの修正・追加
+3. "Proposed Approach" — アプローチの修正・追加
+
+各改訂提案について:
+- proposed_text: 修正案（日本語）— 元のRQ内容を具体的に参照し、\
+どこをどう修正すべきか明確に記述
+- reason: その理由（日本語）— 今週のエビデンス（論文・イベント）に\
+基づいて、なぜこの修正が必要か説明
+- linked_paper_indices: 根拠となる論文のインデックス
+- linked_event_indices: 根拠となるイベントのインデックス
+- confidence: 0.0-1.0 この提案の信頼度
+
+重要なルール:
+- 汎用的・一般的な提案は不可。元のRQ内容を具体的に参照すること
+- エビデンスに基づかない提案は不可
+- confidence < 0.5 の提案は除外
+- 修正不要のRQには revisions: [] を返すこと
+
+JSON形式で返答してください:
 {
-  "rq_updates": [
+  "rq_revisions": [
     {
       "rq_index": 0,
-      "linked_paper_indices": [1, 3],
-      "linked_event_indices": [0, 5],
-      "update_summary": "...",
-      "suggested_gap_update": "",
-      "suggested_approach_update": "",
-      "confidence": 0.7
+      "revisions": [
+        {
+          "category": "Gap Identified",
+          "proposed_text": "（修正案を日本語で記述）",
+          "reason": "（その理由を日本語で記述）",
+          "linked_paper_indices": [1, 3],
+          "linked_event_indices": [0],
+          "confidence": 0.8
+        }
+      ]
     }
   ]
 }
 """
 
 
-def link_evidence_llm(
+def generate_revision_proposals(
     llm: OpenAIClient,
     rqs: List[Dict[str, Any]],
     papers: List[Dict[str, Any]],
     events: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Use LLM to link RQs to evidence and generate update proposals."""
+    """Use LLM to generate categorized revision proposals per RQ.
 
+    Returns a flat list of revision dicts, each with rq_id, rq_title, etc.
+    """
     rqs_for_prompt = []
     for i, rq in enumerate(rqs):
         rqs_for_prompt.append({
             "index": i,
             "title": rq.get("title", ""),
-            "gap": (rq.get("gap") or "")[:200],
-            "approach": (rq.get("approach") or "")[:200],
+            "rationale": (rq.get("rationale") or rq.get("background") or "")[:500],
+            "gap": (rq.get("gap") or "")[:500],
+            "approach": (rq.get("approach") or "")[:500],
             "tags": rq.get("tags", []),
         })
 
@@ -112,7 +140,7 @@ def link_evidence_llm(
         papers_for_prompt.append({
             "index": i,
             "title": p.get("Name", ""),
-            "core_idea": (p.get("Core Idea") or "")[:150],
+            "core_idea": (p.get("Core Idea") or "")[:200],
         })
 
     events_for_prompt = []
@@ -121,66 +149,70 @@ def link_evidence_llm(
             "index": i,
             "title": ev.get("title", ""),
             "event_type": ev.get("event_type", ""),
-            "summary": (ev.get("summary_text") or "")[:150],
+            "summary": (ev.get("summary_text") or "")[:200],
         })
 
     user_prompt = (
-        f"Link evidence to these {len(rqs_for_prompt)} RQs.\n\n"
-        f"Papers ({len(papers_for_prompt)}):\n{json.dumps(papers_for_prompt, ensure_ascii=False)}\n\n"
-        f"Events ({len(events_for_prompt)}):\n{json.dumps(events_for_prompt, ensure_ascii=False)}\n\n"
-        f"RQs:\n{json.dumps(rqs_for_prompt, indent=2, ensure_ascii=False)}"
+        f"以下の{len(rqs_for_prompt)}件のRQについて改訂提案を生成してください。\n\n"
+        f"今週の論文 ({len(papers_for_prompt)}件):\n"
+        f"{json.dumps(papers_for_prompt, ensure_ascii=False)}\n\n"
+        f"今週のイベント ({len(events_for_prompt)}件):\n"
+        f"{json.dumps(events_for_prompt, ensure_ascii=False)}\n\n"
+        f"RQ一覧:\n{json.dumps(rqs_for_prompt, indent=2, ensure_ascii=False)}"
     )
 
-    result = llm.call_json(system=RQ_EVIDENCE_SYSTEM_PROMPT, user=user_prompt)
+    result = llm.call_json(system=RQ_REVISION_SYSTEM_PROMPT, user=user_prompt)
 
-    # Build enriched status records
-    statuses = []
-    updates_by_idx = {}
-    for u in result.parsed.get("rq_updates", []):
-        updates_by_idx[u.get("rq_index", -1)] = u
+    # Flatten into individual revision records
+    all_revisions: List[Dict[str, Any]] = []
+    rq_revisions = result.parsed.get("rq_revisions", [])
 
-    for i, rq in enumerate(rqs):
-        update = updates_by_idx.get(i, {})
+    for rq_rev in rq_revisions:
+        rq_idx = rq_rev.get("rq_index", -1)
+        if rq_idx < 0 or rq_idx >= len(rqs):
+            logger.warning("Invalid rq_index %d (have %d RQs)", rq_idx, len(rqs))
+            continue
 
-        # Map paper/event indices to actual records
-        related_papers = []
-        for pi in update.get("linked_paper_indices", []):
-            if 0 <= pi < len(papers):
-                related_papers.append({
-                    "id": papers[pi].get("notion_page_id", ""),
-                    "title": papers[pi].get("Name", ""),
-                    "score": 1,
-                })
+        rq = rqs[rq_idx]
+        revisions = rq_rev.get("revisions") or []
 
-        related_events = []
-        for ei in update.get("linked_event_indices", []):
-            if 0 <= ei < len(events):
-                related_events.append({
-                    "id": events[ei].get("page_id", events[ei].get("notion_page_id", "")),
-                    "title": events[ei].get("title", ""),
-                    "score": 1,
-                    "event_type": events[ei].get("event_type", ""),
-                })
+        for rev in revisions:
+            confidence = rev.get("confidence", 0.0)
+            if confidence < 0.5:
+                logger.debug(
+                    "Skipping low-confidence revision for RQ %d (%s): %.2f",
+                    rq_idx, rq.get("title", "")[:40], confidence,
+                )
+                continue
 
-        statuses.append({
-            "rq_id": rq["page_id"],
-            "rq_title": rq["title"],
-            "priority": rq.get("priority", ""),
-            "status": rq.get("status", ""),
-            "tags": rq.get("tags", []),
-            "related_papers": related_papers,
-            "related_events": related_events,
-            "evidence_count": len(related_papers) + len(related_events),
-            "open_gaps": rq.get("gap", ""),
-            "current_approach": rq.get("approach", ""),
-            "update_summary": update.get("update_summary", ""),
-            "suggested_gap_update": update.get("suggested_gap_update", ""),
-            "suggested_approach_update": update.get("suggested_approach_update", ""),
-            "llm_confidence": update.get("confidence", 0.0),
-        })
+            # Build evidence lines
+            evidence_lines: list[str] = []
+            for pi in rev.get("linked_paper_indices", []):
+                if 0 <= pi < len(papers):
+                    evidence_lines.append(f"[paper] {papers[pi].get('Name', '?')}")
+            for ei in rev.get("linked_event_indices", []):
+                if 0 <= ei < len(events):
+                    evidence_lines.append(f"[event] {events[ei].get('title', '?')}")
 
-    statuses.sort(key=lambda s: (-s["evidence_count"], s["rq_title"]))
-    return statuses
+            all_revisions.append({
+                "rq_id": rq["page_id"],
+                "rq_title": rq["title"],
+                "priority": rq.get("priority", ""),
+                "status": rq.get("status", ""),
+                "tags": rq.get("tags", []),
+                "category": rev.get("category", ""),
+                "proposed_text": rev.get("proposed_text", ""),
+                "reason": rev.get("reason", ""),
+                "confidence": confidence,
+                "evidence_lines": evidence_lines,
+                "evidence_count": len(evidence_lines),
+            })
+
+    logger.info(
+        "LLM: %d revision proposals for %d RQs (from %d RQ revision sets)",
+        len(all_revisions), len(rqs), len(rq_revisions),
+    )
+    return all_revisions
 
 
 # ================================================================
@@ -215,45 +247,44 @@ def load_evidence_json(
 # Output writers
 # ================================================================
 
-def write_rq_status_json(statuses: List[dict], path: Path) -> None:
+def write_revisions_json(revisions: List[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(statuses, indent=2, ensure_ascii=False, default=str) + "\n")
-    logger.info("Wrote %d RQ statuses to %s", len(statuses), path)
+    path.write_text(json.dumps(revisions, indent=2, ensure_ascii=False, default=str) + "\n")
+    logger.info("Wrote %d revision proposals to %s", len(revisions), path)
 
 
 def write_summary_md(
-    statuses: List[Dict[str, Any]], week_id: str, *,
-    papers_count: int, events_count: int, path: Path,
+    revisions: List[Dict[str, Any]], week_id: str, *,
+    rqs_count: int, papers_count: int, events_count: int, path: Path,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with_evidence = [s for s in statuses if s["evidence_count"] > 0]
-    without_evidence = [s for s in statuses if s["evidence_count"] == 0]
+
+    # Group by RQ
+    by_rq: Dict[str, List[Dict[str, Any]]] = {}
+    for rev in revisions:
+        rq_title = rev["rq_title"]
+        by_rq.setdefault(rq_title, []).append(rev)
 
     with path.open("w", encoding="utf-8") as f:
-        f.write(f"# Weekly RQ Status — {week_id}\n\n")
+        f.write(f"# Weekly RQ Revision Proposals \u2014 {week_id}\n\n")
         f.write(f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n")
 
         f.write("## Overview\n\n")
-        f.write(f"- **RQs tracked:** {len(statuses)}\n")
-        f.write(f"- **RQs with evidence:** {len(with_evidence)}\n")
+        f.write(f"- **RQs tracked:** {rqs_count}\n")
+        f.write(f"- **RQs with revisions:** {len(by_rq)}\n")
+        f.write(f"- **Total revision proposals:** {len(revisions)}\n")
         f.write(f"- **Evidence pool:** {papers_count} papers, {events_count} events\n\n")
 
-        if with_evidence:
-            f.write("## RQs with New Evidence\n\n")
-            for i, s in enumerate(with_evidence, 1):
-                f.write(f"### {i}. {s['rq_title']}\n\n")
-                f.write(f"- **Priority:** {s['priority']}  |  **Evidence:** {s['evidence_count']}\n")
-                if s.get("update_summary"):
-                    f.write(f"- **Update:** {s['update_summary']}\n")
-                if s.get("suggested_gap_update"):
-                    f.write(f"- **Gap update:** {s['suggested_gap_update']}\n")
+        for rq_title, rq_revs in by_rq.items():
+            f.write(f"## {rq_title}\n\n")
+            for i, rev in enumerate(rq_revs, 1):
+                f.write(f"### {i}. [{rev['category']}]\n\n")
+                f.write(f"- **\u4fee\u6b63\u6848:** {rev['proposed_text'][:200]}\n")
+                f.write(f"- **\u7406\u7531:** {rev['reason'][:200]}\n")
+                f.write(f"- **Confidence:** {rev['confidence']:.2f}\n")
+                if rev.get("evidence_lines"):
+                    f.write(f"- **Evidence:** {'; '.join(rev['evidence_lines'][:3])}\n")
                 f.write("\n")
-
-        if without_evidence:
-            f.write("## RQs Without New Evidence\n\n")
-            for s in without_evidence:
-                f.write(f"- {s['rq_title']}\n")
-            f.write("\n")
 
         f.write(f"---\n\n*Generated by {SCRIPT_NAME}*\n")
     logger.info("Wrote summary to %s", path)
@@ -266,7 +297,7 @@ def write_summary_md(
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=SCRIPT_NAME,
-        description="Weekly RQ status: LLM evidence linking + proposals.",
+        description="Weekly RQ status: LLM revision proposals (categorized, Japanese).",
     )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--run", action="store_true", default=False)
@@ -277,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--write", action="store_true", default=False,
                     help="Persist to Notion (default: off).")
     p.add_argument("--limit", type=int, default=0,
-                    help="Max rows to write (0 = all).")
+                    help="Max revisions to write (0 = all).")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -334,17 +365,16 @@ def main(argv: List[str] | None = None) -> Dict[str, Any]:
     events = load_evidence_json(wk.week_id, "048_weekly_events_digest", "events.json",
                                  base=args.output_base)
 
-    # ---- LLM evidence linking ----
-    logger.info("Linking evidence to %d RQs via OpenAI ...", len(target_rqs))
-    statuses = link_evidence_llm(llm, target_rqs, papers, events)
-    with_evidence = sum(1 for s in statuses if s["evidence_count"] > 0)
-    logger.info("OpenAI: %d RQs with evidence, %d without",
-                with_evidence, len(statuses) - with_evidence)
+    # ---- LLM revision proposals ----
+    logger.info("Generating revision proposals for %d RQs via OpenAI ...", len(target_rqs))
+    revisions = generate_revision_proposals(llm, target_rqs, papers, events)
+    logger.info("OpenAI: %d revision proposals generated", len(revisions))
 
     # ---- Write outputs ----
-    write_rq_status_json(statuses, out_dir / "rq_status.json")
-    write_summary_md(statuses, wk.week_id, papers_count=len(papers),
-                      events_count=len(events), path=out_dir / "summary.md")
+    write_revisions_json(revisions, out_dir / "rq_revisions.json")
+    write_summary_md(revisions, wk.week_id, rqs_count=len(target_rqs),
+                      papers_count=len(papers), events_count=len(events),
+                      path=out_dir / "summary.md")
 
     # ---- Notion writeback ----
     notion_write_count = 0
@@ -363,16 +393,29 @@ def main(argv: List[str] | None = None) -> Dict[str, Any]:
         )
         repo.validate_schema()
 
-        rows_to_write = statuses[:args.limit] if args.limit > 0 else statuses
-        for rq_rec in rows_to_write:
-            key, props = repo.build_rq_properties(
-                rq_record=rq_rec, week_id=wk.week_id, tracker=trunc_tracker,
-            )
-            page = repo.upsert_row(key=key, properties=props)
-            result["rq_update_page_ids"].append(page.get("id", ""))
-            notion_write_count += 1
+        rows_to_write = revisions[:args.limit] if args.limit > 0 else revisions
+        notion_fail_count = 0
+        for idx, rev in enumerate(rows_to_write):
+            try:
+                key, props = repo.build_rq_revision_properties(
+                    revision=rev, week_id=wk.week_id,
+                    revision_index=idx, tracker=trunc_tracker,
+                )
+                page = repo.upsert_row(key=key, properties=props)
+                result["rq_update_page_ids"].append(page.get("id", ""))
+                notion_write_count += 1
+            except Exception as e:
+                notion_fail_count += 1
+                rq_title = rev.get("rq_title", "?")
+                err = f"Failed to write RQ revision {idx} ({rq_title}): {e}"
+                logger.error(err)
+                result["errors"].append(err)
 
-        logger.info("Notion: %d rows upserted to WEEKLY_RQ_UPDATE_DB", notion_write_count)
+        logger.info(
+            "Notion: %d revision rows upserted to WEEKLY_RQ_UPDATE_DB "
+            "(%d failed)",
+            notion_write_count, notion_fail_count,
+        )
 
     # ---- Metadata ----
     meta = RunMetadata.build(
@@ -380,7 +423,7 @@ def main(argv: List[str] | None = None) -> Dict[str, Any]:
         date_from=date_from_iso, date_to=date_to_iso,
         counts={
             "rqs_fetched": len(raw_pages), "rqs_filtered": len(target_rqs),
-            "rqs_with_evidence": with_evidence,
+            "revisions_generated": len(revisions),
             "papers_loaded": len(papers), "events_loaded": len(events),
         },
         extra={
@@ -393,11 +436,12 @@ def main(argv: List[str] | None = None) -> Dict[str, Any]:
     meta.save(out_dir / "run_metadata.json")
 
     result["summary"] = {
-        "rqs_tracked": len(statuses),
-        "rqs_with_evidence": with_evidence,
+        "rqs_tracked": len(target_rqs),
+        "revisions_generated": len(revisions),
     }
     result["ok"] = True
-    logger.info("=== Done: %d RQs → %s ===", len(statuses), out_dir)
+    logger.info("=== Done: %d revisions for %d RQs \u2192 %s ===",
+                len(revisions), len(target_rqs), out_dir)
     logger.info(llm.usage_summary())
     return result
 

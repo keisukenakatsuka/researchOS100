@@ -331,7 +331,11 @@ def _write_to_notion(
     codex_db_id = get_db_id("NOTION_ROS_Values_Codex_ID")
 
     resolver = NotionDataSourceResolver(client=client)
-    data_source_id = resolver.resolve(codex_db_id)
+    resolved = resolver.resolve_once(
+        name="ROS_Values_Codex",
+        database_id=codex_db_id,
+    )
+    data_source_id = resolved.data_source_id
     logger.info("Resolved data_source_id for ROS_Values_Codex: %s", data_source_id)
 
     repo = ValuesCodexRepo(

@@ -297,10 +297,13 @@ class GitHubTimerRepo:
         page_id: str,
         now_jst: datetime,
     ) -> None:
-        """Row actually changed: set ``last_private_run_at`` and clear comment flag.
+        """Set ``last_private_run_at`` and clear ``private_comment_needed``.
 
-        Called only for rows whose ``src_path`` had actual changes in the
-        private repo commit.
+        Called in two cases:
+        1. First-check — the row's ``last_private_run_at`` was empty
+           (page just created), so we initialise it.
+        2. File changes — the row's ``src_path`` had actual changes in
+           the private repo commit.
         """
         self.client.update_page(
             page_id=page_id,

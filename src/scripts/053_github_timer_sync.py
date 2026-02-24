@@ -571,19 +571,30 @@ def run_private_phase(
     1. Check for changes in PRIVATE_REPO
     2. If changes exist, determine which rows' src_path overlaps
     3. Commit & push
-    4. Only after successful push: update Notion timestamps
-       - last_checked_at for all rows
-       - last_private_run_at for affected rows only
+    4. After Phase A completes (even with no git changes):
+       - last_checked_at        ← now_jst  (all rows)
+       - last_private_run_at    ← now_jst  (all rows)
+       - private_comment_needed ← false    (all rows)
     """
     logger.info("=== Phase A: Private Repo ===")
 
     changed_paths = git_changed_paths(PRIVATE_REPO)
     logger.info("Changed paths in private repo: %d", len(changed_paths))
     for cp in sorted(changed_paths)[:20]:
-        logger.debug("  %s", cp)
+        logger.debug("  changed: %s", cp)
 
-    # Determine which rows had changes
+    # Determine which rows had changes (used for commit message only)
     affected_rows = [r for r in rows if _row_src_overlaps_changes(r, changed_paths)] if changed_paths else []
+
+    # Diagnostic: log overlap evaluation per row
+    for row in rows:
+        name = row.get("Name", "?")
+        src_path = (row.get("src_path") or "").strip().rstrip("/")
+        overlaps = row in affected_rows
+        logger.debug(
+            "  row %-40s src_path=%-50s overlaps_changes=%s",
+            name, src_path, overlaps,
+        )
 
     # ---- dry-run reporting ----
     if dry_run:
@@ -591,11 +602,12 @@ def run_private_phase(
         for row in rows:
             name = row.get("Name", "?")
             is_affected = row in affected_rows
-            status = "PROCESS" if is_affected else "SKIP (no changes in src_path)"
+            status = "AFFECTED (file changes)" if is_affected else "no file changes"
             logger.info("  [%s] %s", status, name)
         logger.info("Notion updates that would occur:")
-        logger.info("  last_checked_at: %d rows", len(rows))
-        logger.info("  last_private_run_at: %d rows", len(affected_rows))
+        logger.info("  last_checked_at:         %d rows (all)", len(rows))
+        logger.info("  last_private_run_at:     %d rows (all)", len(rows))
+        logger.info("  private_comment_needed:  %d rows → unchecked (all)", len(rows))
         if changed_paths and affected_rows:
             msg = _build_private_commit_msg(affected_rows)
             logger.info("Commit message: %s", msg)
@@ -609,8 +621,10 @@ def run_private_phase(
     # ---- live: handle no changes ----
     if not changed_paths:
         logger.info("No changes in private repo — skipping commit")
-        # Still update last_checked_at (job ran successfully)
+        # Still update last_checked_at and last_private_run_at
+        # (the sync job entered the DB page successfully)
         _update_checked_all(rows, repo, now_jst)
+        _update_private_run_all(rows, repo, now_jst)
         return
 
     # ---- live: commit & push ----
@@ -630,16 +644,11 @@ def run_private_phase(
         return
 
     # ---- Notion updates (only after successful push) ----
+    # Update last_checked_at for all rows
     _update_checked_all(rows, repo, now_jst)
 
-    for row in affected_rows:
-        page_id = row.get("notion_page_id", "")
-        name = row.get("Name", "?")
-        try:
-            repo.update_private_changed(page_id=page_id, now_jst=now_jst)
-            logger.info("Updated last_private_run_at for %s", name)
-        except Exception as e:
-            logger.error("Failed to update private timestamps for %s: %s", name, e)
+    # Update last_private_run_at and clear private_comment_needed for ALL rows.
+    _update_private_run_all(rows, repo, now_jst)
 
 
 def _update_checked_all(
@@ -656,6 +665,29 @@ def _update_checked_all(
             logger.info("Updated last_checked_at for %s", name)
         except Exception as e:
             logger.error("Failed to update last_checked_at for %s: %s", name, e)
+
+
+def _update_private_run_all(
+    rows: List[Dict[str, Any]],
+    repo: Any,
+    now_jst: datetime,
+) -> None:
+    """Update last_private_run_at and clear private_comment_needed for ALL rows.
+
+    Called every time Phase A completes successfully (regardless of
+    whether git changes existed).  The sync job entered the DB page,
+    so every enabled row gets ``last_private_run_at = now_jst`` and
+    ``private_comment_needed = false``.
+    """
+    for row in rows:
+        page_id = row.get("notion_page_id", "")
+        name = row.get("Name", "?")
+        try:
+            repo.update_private_changed(page_id=page_id, now_jst=now_jst)
+            logger.info("Updated last_private_run_at for %s", name)
+            logger.info("Cleared private_comment_needed for %s", name)
+        except Exception as e:
+            logger.error("Failed to update private timestamps for %s: %s", name, e)
 
 
 # ----------------------------------------------------------------
@@ -676,6 +708,8 @@ def run_prod_phase(
     1. For each row: validate paths, collect eligible files, copy to prod
     2. Commit & push production repo
     3. Only after successful push: update Notion timestamps
+       - last_prod_run_at and prod_comment_needed for all rows
+         that passed the prod_due_at gate (regardless of file changes)
     """
     logger.info("=== Phase B+C: Production ===")
 
@@ -693,7 +727,8 @@ def run_prod_phase(
             )
             return
 
-    involved_rows: List[Dict[str, Any]] = []
+    involved_rows: List[Dict[str, Any]] = []  # rows that had files copied
+    eligible_rows: List[Dict[str, Any]] = []  # rows that passed prod_due_at gate
     total_copied = 0
     skipped: List[tuple[str, str]] = []  # (name, reason) for dry-run
 
@@ -715,11 +750,21 @@ def run_prod_phase(
 
         # Gate check: prod_due_at
         prod_due_at = _parse_iso_datetime(row.get("prod_due_at"))
+        logger.debug(
+            "Row %s: prod_due_at=%s  now_jst=%s  gate_passed=%s",
+            name,
+            prod_due_at.isoformat(timespec="seconds") if prod_due_at else "None",
+            now_jst.isoformat(timespec="seconds"),
+            prod_due_at is None or now_jst >= prod_due_at,
+        )
         if prod_due_at is not None and now_jst < prod_due_at:
             reason = f"prod_due_at in future ({prod_due_at.isoformat(timespec='seconds')})"
             logger.info("Row %s: %s — skipping", name, reason)
             skipped.append((name, reason))
             continue
+
+        # Row passed the prod_due_at gate → mark as eligible for Notion update
+        eligible_rows.append(row)
 
         # Determine include/exclude globs
         include_globs = _parse_globs(row.get("include_globs")) or DEFAULT_INCLUDE_GLOBS
@@ -727,6 +772,12 @@ def run_prod_phase(
 
         # Determine since timestamp
         since = _parse_iso_datetime(row.get("last_prod_run_at"))
+        logger.debug(
+            "Row %s: last_prod_run_at=%s  include=%s  exclude=%s",
+            name,
+            since.isoformat(timespec="seconds") if since else "None",
+            include_globs, exclude_globs,
+        )
 
         try:
             files = collect_eligible_files(
@@ -743,9 +794,7 @@ def run_prod_phase(
             continue
 
         if not files:
-            reason = "no eligible files"
-            logger.info("Row %s: %s", name, reason)
-            skipped.append((name, reason))
+            logger.info("Row %s: no eligible files (already up-to-date)", name)
             continue
 
         logger.info("Row %s: %d eligible files", name, len(files))
@@ -768,47 +817,59 @@ def run_prod_phase(
         except Exception as e:
             logger.error("Row %s: error copying files: %s", name, e)
 
+    logger.info(
+        "Production phase: %d eligible (passed gate), %d with files copied, %d skipped",
+        len(eligible_rows), len(involved_rows), len(skipped),
+    )
+
     # ---- dry-run reporting ----
     if dry_run:
         logger.info("--- Dry-run: Production Phase Summary ---")
         for row in involved_rows:
             name = row.get("Name", "?")
-            logger.info("  [PROCESS] %s", name)
+            logger.info("  [COPY] %s", name)
+        for row in eligible_rows:
+            if row not in involved_rows:
+                name = row.get("Name", "?")
+                logger.info("  [GATE-PASSED, no files] %s", name)
         for name, reason in skipped:
             logger.info("  [SKIP] %s — %s", name, reason)
         if involved_rows:
             msg = _build_prod_commit_msg(involved_rows)
             logger.info("Commit message: %s", msg)
             logger.info("Total files to copy: %d", total_copied)
-            logger.info("Notion updates (last_prod_run_at): %d rows", len(involved_rows))
         else:
             logger.info("No files to copy — no commit")
+        logger.info("Notion updates (last_prod_run_at): %d rows (all gate-passed)", len(eligible_rows))
         logger.info("--- End Dry-run Summary ---")
         return
 
-    if not involved_rows:
-        logger.info("No files copied to production — skipping commit")
+    # ---- live: commit & push (only if files were actually copied) ----
+    if involved_rows:
+        msg = _build_prod_commit_msg(involved_rows)
+
+        git_add_all(PROD_REPO)
+        if not git_commit(PROD_REPO, msg):
+            logger.error("Prod commit failed — skipping push and Notion updates")
+            return
+
+        if not git_push(PROD_REPO):
+            logger.error("Prod push failed — skipping Notion updates")
+            return
+
+    # ---- Notion updates for ALL rows that passed the prod_due_at gate ----
+    # Even rows with no files to copy get their timestamps updated,
+    # because the gate condition (now >= prod_due_at) was satisfied.
+    if not eligible_rows:
+        logger.info("No rows passed prod_due_at gate — no Notion updates")
         return
 
-    # ---- live: commit & push ----
-    msg = _build_prod_commit_msg(involved_rows)
-
-    git_add_all(PROD_REPO)
-    if not git_commit(PROD_REPO, msg):
-        logger.error("Prod commit failed — skipping push and Notion updates")
-        return
-
-    if not git_push(PROD_REPO):
-        logger.error("Prod push failed — skipping Notion updates")
-        return
-
-    # ---- Notion updates (only after successful push) ----
-    for row in involved_rows:
+    for row in eligible_rows:
         page_id = row.get("notion_page_id", "")
         name = row.get("Name", "?")
         try:
             repo.update_prod_run(page_id=page_id, now_jst=now_jst)
-            logger.info("Updated last_prod_run_at for %s", name)
+            logger.info("Updated last_prod_run_at + cleared prod_comment_needed for %s", name)
         except Exception as e:
             logger.error("Failed to update prod timestamps for %s: %s", name, e)
 

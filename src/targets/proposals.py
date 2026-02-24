@@ -132,20 +132,34 @@ def propose_priority_and_cadence(
     proposed_priority = current_priority
     proposed_cadence = current_cadence
 
-    # --- Rule A: Disable / remove candidates ---
+    # --- Rule A: Flag candidates needing external validation ---
+    # Instead of auto-marking as drop_candidate, flag for external
+    # search validation.  The actual drop decision happens in 050 after
+    # Google CSE + NewsAPI + LLM analysis.
+    needs_external_validation = False
+
     if sig < REMOVAL_EFFECTIVENESS_THRESHOLD:
-        action = "drop_candidate"
-        reason_parts.append(f"very low signal ({sig:.2f} < {REMOVAL_EFFECTIVENESS_THRESHOLD})")
+        action = "review"
+        needs_external_validation = True
+        reason_parts.append(
+            f"very low signal ({sig:.2f} < {REMOVAL_EFFECTIVENESS_THRESHOLD}) "
+            f"— needs external validation before drop"
+        )
     elif noise > 0.80 and n_events < 3:
-        action = "drop_candidate"
-        reason_parts.append(f"high noise ({noise:.2f}) with few events ({n_events})")
+        action = "review"
+        needs_external_validation = True
+        reason_parts.append(
+            f"high noise ({noise:.2f}) with few events ({n_events}) "
+            f"— needs external validation before drop"
+        )
     elif n_events == 0 and sig < DOWNGRADE_EFFECTIVENESS_THRESHOLD and (
         days_since is None or days_since >= NO_EVENT_DAYS_THRESHOLD
     ):
         action = "review"
+        needs_external_validation = True
         reason_parts.append(
             f"no events recently (days_since={days_since}) "
-            f"and low signal ({sig:.2f})"
+            f"and low signal ({sig:.2f}) — needs external validation"
         )
 
     # --- Rule B: Upgrade candidates ---
@@ -201,6 +215,7 @@ def propose_priority_and_cadence(
         "proposed_priority": proposed_priority,
         "proposed_cadence": proposed_cadence,
         "reason": "; ".join(reason_parts),
+        "needs_external_validation": needs_external_validation,
     }
 
 
@@ -381,10 +396,14 @@ def propose_target_actions(
             "proposed_priority": pc["proposed_priority"],
             "proposed_cadence": pc["proposed_cadence"],
             "reason": pc["reason"],
+            "needs_external_validation": pc.get("needs_external_validation", False),
             # Keyword suggestions
             "keyword_suggestions": kw,
             # Evidence
             "linked_event_ids": t.get("linked_event_ids", []),
+            # Search enrichment (populated by 050 external search)
+            "suggested_keywords": [],
+            "suggested_source_urls": [],
         })
 
     # Tally

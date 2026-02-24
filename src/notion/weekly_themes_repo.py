@@ -67,6 +67,7 @@ class WeeklyThemesRepo:
     """
 
     key_property_name = "Key"
+    _db_label = "WEEKLY_THEMES_DB"
 
     def __init__(
         self,
@@ -143,9 +144,11 @@ class WeeklyThemesRepo:
         """Idempotent write: update if key exists, create otherwise.
 
         If Notion returns 404 ``object_not_found`` (typically because a
-        relation references an inaccessible page), the write is retried
-        once with all relation-type properties removed so that non-
-        relation fields still persist.
+        relation references an inaccessible page) or 400 ``validation_error``
+        (property doesn't exist), the write is retried once with all
+        relation-type properties removed so non-relation fields still persist.
+
+        Raises on API error — never silently skips.
         """
         existing = self._query_by_key(key)
         try:
@@ -153,41 +156,59 @@ class WeeklyThemesRepo:
                 page_id = existing[0]["id"]
                 if len(existing) > 1:
                     logger.warning(
-                        "Duplicate key %r found (%d pages) — updating first only",
-                        key, len(existing),
+                        "[%s] Duplicate key %r found (%d pages) — updating first only",
+                        self._db_label, key, len(existing),
                     )
-                logger.debug("Upsert UPDATE key=%s page_id=%s", key, page_id)
-                return self.client.update_page(page_id=page_id, properties=properties)
+                logger.debug("[%s] Upsert UPDATE key=%s page_id=%s", self._db_label, key, page_id)
+                result = self.client.update_page(page_id=page_id, properties=properties)
+                logger.info(
+                    "[%s] SUCCESS: updated key=%s page_id=%s",
+                    self._db_label, key, result.get("id", page_id),
+                )
+                return result
             else:
-                logger.debug("Upsert CREATE key=%s", key)
-                return self.client.create_page(
+                logger.debug("[%s] Upsert CREATE key=%s", self._db_label, key)
+                result = self.client.create_page(
                     parent_db_id=self.database_id,
                     properties=properties,
                 )
+                logger.info(
+                    "[%s] SUCCESS: created key=%s page_id=%s",
+                    self._db_label, key, result.get("id", "?"),
+                )
+                return result
         except NotionAPIError as e:
-            is_object_not_found = (
+            is_retryable = (
                 e.status_code == 404
                 or e.payload.get("code") == "object_not_found"
+                or e.payload.get("code") == "validation_error"
             )
-            if not is_object_not_found:
+            if not is_retryable:
+                logger.error(
+                    "[%s] FAILED: key=%s error=%s", self._db_label, key, e,
+                )
                 raise
 
             # Retry once without relation properties
             stripped = self._strip_relation_props(properties)
             dropped = sorted(set(properties) - set(stripped))
             logger.warning(
-                "Upsert key=%s got object_not_found (404) — "
-                "retrying without relation properties %s",
-                key, dropped,
+                "[%s] key=%s got %s — retrying without relation properties %s",
+                self._db_label, key, e.payload.get("code", f"status={e.status_code}"), dropped,
             )
             if existing:
                 page_id = existing[0]["id"]
-                return self.client.update_page(page_id=page_id, properties=stripped)
+                result = self.client.update_page(page_id=page_id, properties=stripped)
             else:
-                return self.client.create_page(
+                result = self.client.create_page(
                     parent_db_id=self.database_id,
                     properties=stripped,
                 )
+            logger.info(
+                "[%s] SUCCESS (retry): key=%s page_id=%s",
+                self._db_label, key, result.get("id", "?"),
+            )
+            return result
 
     def build_theme_properties(
         self,

@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 PROP_NAME = "Name"                                       # title
 PROP_DOMAIN_KEY = "Domain Key"                           # rich_text
-PROP_REVIEW_QUARTER = "Review Quarter"                   # rich_text
+PROP_REVIEW_QUARTER = "Review Quarter"                   # select
 PROP_IDEMPOTENCY_KEY = "Idempotency Key"                 # rich_text
 PROP_VALUE_DEFINITION = "Value Definition"               # rich_text
 PROP_BEHAVIORAL_TRANSLATION = "Behavioral Translation"   # rich_text
@@ -64,7 +64,7 @@ PROP_CHANGE_NOTES = "Change Notes"                       # rich_text
 EXPECTED_PROPERTIES: Dict[str, str] = {
     PROP_NAME: "title",
     PROP_DOMAIN_KEY: "rich_text",
-    PROP_REVIEW_QUARTER: "rich_text",
+    PROP_REVIEW_QUARTER: "select",
     PROP_IDEMPOTENCY_KEY: "rich_text",
     PROP_VALUE_DEFINITION: "rich_text",
     PROP_BEHAVIORAL_TRANSLATION: "rich_text",

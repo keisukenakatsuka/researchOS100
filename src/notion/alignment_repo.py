@@ -284,9 +284,12 @@ class AlignmentLogRepo:
             PROP_REVIEW_TYPE: _select(entry.review_type),
             PROP_IMPORTANCE_SCORE: _number(entry.importance_score),
             PROP_ALIGNMENT_SCORE: _number(entry.alignment_score),
-            PROP_GAP_SCORE: _number(entry.gap_score),
-            PROP_SIGNIFICANT_GAP: _checkbox(entry.significant_gap),
         }
+
+        if PROP_GAP_SCORE not in self._skip_items:
+            props[PROP_GAP_SCORE] = _number(entry.gap_score)
+        if PROP_SIGNIFICANT_GAP not in self._skip_items:
+            props[PROP_SIGNIFICANT_GAP] = _checkbox(entry.significant_gap)
 
         if entry.reflection_text:
             props[PROP_REFLECTION_TEXT] = _rt(notion_truncate(

@@ -85,6 +85,8 @@ RELATION_PROPERTIES: Set[str] = {
 
 # Properties that are optional (won't fail validation if missing).
 OPTIONAL_PROPERTIES: Set[str] = {
+    PROP_GAP_SCORE,
+    PROP_SIGNIFICANT_GAP,
     PROP_TRANSCRIPT,
     PROP_AUDIO_URL,
     PROP_AI_SUMMARY,

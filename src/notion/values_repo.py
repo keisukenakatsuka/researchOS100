@@ -206,7 +206,7 @@ class ValuesCodexRepo:
         props: Dict[str, Any] = {
             PROP_NAME: _title(domain.domain_label),
             PROP_DOMAIN_KEY: _rt(domain.domain_id),
-            PROP_REVIEW_QUARTER: _rt(review_quarter),
+            PROP_REVIEW_QUARTER: _select(review_quarter),
             PROP_IDEMPOTENCY_KEY: _rt(key),
             PROP_VALUE_DEFINITION: _rt(notion_truncate(
                 domain.value_definition,
@@ -321,7 +321,7 @@ class ValuesCodexRepo:
             data_source_id=self.data_source_id,
             filter={
                 "property": PROP_REVIEW_QUARTER,
-                "rich_text": {"equals": review_quarter},
+                "select": {"equals": review_quarter},
             },
             page_size=20,
             fetch_all=False,

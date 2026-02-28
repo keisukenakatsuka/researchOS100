@@ -64,6 +64,12 @@ LOCK_PATH = Path("/tmp/researchos_github_timer.lock")
 DEFAULT_INCLUDE_GLOBS = ["**/*.py", "**/*.ipynb"]
 # Always excluded regardless of row config
 _ALWAYS_EXCLUDE_DIRS = {".ipynb_checkpoints", "__pycache__", ".git"}
+# .DS_Store is an OS artifact — always ignored in dirty checks.
+_PROD_DIRTY_IGNORE: Set[str] = {".DS_Store"}
+# Files excluded from ``git add -A`` in the production repo so
+# they are never staged by the timer script's sync commits.
+# README.md is auto-committed separately; .DS_Store is never committed.
+_PROD_GIT_EXCLUDE: Set[str] = {"README.md", ".DS_Store"}
 
 
 # ----------------------------------------------------------------
@@ -160,15 +166,39 @@ def setup_dual_logging(verbose: bool) -> None:
 # Git helpers (subprocess-based)
 # ----------------------------------------------------------------
 
-def git_has_changes(repo_dir: Path) -> bool:
-    """Return True if the working tree has uncommitted changes."""
+def git_has_changes(repo_dir: Path, *, ignore: Set[str] | None = None) -> bool:
+    """Return True if the working tree has uncommitted changes.
+
+    Parameters
+    ----------
+    ignore:
+        Optional set of relative paths (e.g. ``{"README.md"}``) to
+        exclude from the dirty check.  If the *only* dirty files are
+        in this set, the repo is considered clean.
+    """
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=str(repo_dir),
         capture_output=True,
         text=True,
     )
-    return bool(result.stdout.strip())
+    if not result.stdout.strip():
+        return False
+    if not ignore:
+        return True
+    # Check whether every dirty path is in the ignore set.
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        # Standard porcelain format: "XY PATH" (3-char prefix)
+        path_part = line[3:].strip()
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ")[-1]
+        if path_part.startswith('"') and path_part.endswith('"'):
+            path_part = path_part[1:-1]
+        if path_part not in ignore:
+            return True  # found a dirty file that is NOT ignored
+    return False  # all dirty files are in the ignore set
 
 
 def git_changed_paths(repo_dir: Path) -> Set[str]:
@@ -212,8 +242,17 @@ def git_changed_paths(repo_dir: Path) -> Set[str]:
     return paths
 
 
-def git_add_all(repo_dir: Path) -> None:
-    """Run ``git add -A``."""
+def git_add_all(repo_dir: Path, *, exclude: Set[str] | None = None) -> None:
+    """Run ``git add -A``, optionally excluding specific paths.
+
+    Parameters
+    ----------
+    exclude:
+        Relative paths (e.g. ``{"README.md"}``) that must NOT be
+        staged.  When provided the function runs ``git add -A`` then
+        ``git reset HEAD -- <path>`` for each excluded file that was
+        staged, so they remain as unstaged working-tree changes.
+    """
     subprocess.run(
         ["git", "add", "-A"],
         cwd=str(repo_dir),
@@ -221,7 +260,19 @@ def git_add_all(repo_dir: Path) -> None:
         text=True,
         check=True,
     )
-    logger.debug("git add -A in %s", repo_dir.name)
+    if exclude:
+        for path in exclude:
+            # Unstage only — keeps the working-tree change intact.
+            res = subprocess.run(
+                ["git", "reset", "HEAD", "--", path],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode == 0:
+                logger.debug("Excluded %s from staging", path)
+            # returncode != 0 is fine (file not staged / doesn't exist)
+    logger.debug("git add -A in %s (exclude=%s)", repo_dir.name, exclude or "{}")
 
 
 def git_commit(repo_dir: Path, message: str) -> bool:
@@ -261,6 +312,41 @@ def git_push(repo_dir: Path) -> bool:
             result.returncode, repo_dir.name, result.stderr.strip()[:200],
         )
         return False
+
+
+def _commit_readme_if_dirty(repo_dir: Path) -> bool:
+    """Auto-commit and push README.md if it has uncommitted changes.
+
+    Called before any production sync logic so that the repo is clean.
+    Returns True on success (or if README.md is already clean).
+    Returns False if the commit or push fails (caller should abort).
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--", "README.md"],
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
+    )
+    if not result.stdout.strip():
+        logger.debug("README.md is clean — no pre-commit needed")
+        return True
+
+    logger.info("README.md has uncommitted changes — auto-committing")
+    subprocess.run(
+        ["git", "add", "README.md"],
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if not git_commit(repo_dir, "docs: update README"):
+        logger.error("Failed to auto-commit README.md")
+        return False
+    if not git_push(repo_dir):
+        logger.error("Failed to push README.md auto-commit")
+        return False
+    logger.info("README.md auto-committed and pushed successfully")
+    return True
 
 
 # ----------------------------------------------------------------
@@ -468,6 +554,88 @@ def copy_files_to_prod(
             logger.error("Failed to copy %s: %s", src_file, e)
 
     return copied
+
+
+def _collect_differing_files(
+    src_root: Path,
+    src_path: str,
+    dst_root: Path,
+    dst_path: str,
+    *,
+    include_globs: List[str],
+    exclude_globs: List[str],
+) -> List[Path]:
+    """Content-based comparison: files that differ or are missing in prod.
+
+    Walks ``src_root / src_path``, matches files against *include_globs*,
+    then compares each file's content with ``dst_root / dst_path / rel``.
+
+    Returns sorted relative paths of files that are **missing** in prod
+    or whose **content differs**.  The private version always wins — no
+    mtime check is performed.
+
+    ``.DS_Store`` files and directories in ``_ALWAYS_EXCLUDE_DIRS`` are
+    silently skipped.
+    """
+    src_base = src_root / src_path
+    dst_base = dst_root / dst_path
+
+    if not src_base.exists():
+        logger.warning("src_path does not exist: %s", src_base)
+        return []
+
+    # ---- Single-file mode ----
+    if src_base.is_file():
+        if src_base.name == ".DS_Store":
+            return []
+        dst_file = dst_base
+        if not dst_file.exists():
+            return [Path(src_base.name)]
+        if not filecmp.cmp(str(src_base), str(dst_file), shallow=False):
+            return [Path(src_base.name)]
+        return []
+
+    # ---- Directory mode ----
+    differing: List[Path] = []
+    seen: set[str] = set()
+
+    for pattern in include_globs:
+        for file_path in src_base.glob(pattern):
+            if not file_path.is_file():
+                continue
+
+            rel = file_path.relative_to(src_base)
+            rel_str = str(rel)
+
+            if rel_str in seen:
+                continue
+            seen.add(rel_str)
+
+            # Skip .DS_Store
+            if rel.name == ".DS_Store":
+                continue
+
+            # Skip always-excluded directories
+            if _ALWAYS_EXCLUDE_DIRS & set(rel.parts):
+                continue
+
+            # Exclude-glob check
+            if exclude_globs and _matches_any_glob(rel, exclude_globs):
+                logger.debug("Excluded by glob: %s", rel)
+                continue
+
+            # Compare with prod
+            dst_file = dst_base / rel
+            if not dst_file.exists():
+                differing.append(rel)
+                logger.debug("  MISSING in prod: %s/%s", dst_path, rel)
+                continue
+
+            if not filecmp.cmp(str(file_path), str(dst_file), shallow=False):
+                differing.append(rel)
+                logger.debug("  CONTENT DIFFERS: %s/%s", dst_path, rel)
+
+    return sorted(differing)
 
 
 # ----------------------------------------------------------------
@@ -702,35 +870,45 @@ def run_prod_phase(
     dry_run: bool,
     force: bool,
 ) -> None:
-    """Phase B+C: copy files, commit & push prod repo, update Notion.
+    """Phase B+C: content-compare private/prod, replace diffs, commit & push.
 
-    0. Safety check: abort if prod repo is dirty (unless --force)
-    1. For each row: validate paths, collect eligible files, copy to prod
-    2. Commit & push production repo
-    3. Only after successful push: update Notion timestamps
-       - last_prod_run_at and prod_comment_needed for all rows
-         that passed the prod_due_at gate (regardless of file changes)
+    0. Auto-commit README.md if dirty (live mode only)
+    1. Abort if prod repo has other uncommitted changes (unless --force)
+    2. For each eligible row (prod_due_at <= now): content-compare files
+    3. Replace differing prod files with the private version
+    4. Show diff summary, commit on main, push
+    5. Update Notion timestamps for all eligible rows
     """
     logger.info("=== Phase B+C: Production ===")
 
-    # Safety check: abort if prod repo is dirty
-    if git_has_changes(PROD_REPO):
-        if force:
+    # Step 0: Auto-commit README.md before any sync
+    if not dry_run:
+        if not _commit_readme_if_dirty(PROD_REPO):
+            logger.error("ABORT: Failed to auto-commit README.md in production repo")
+            return
+
+    # Step 1: Strict dirty check (.DS_Store is ignored)
+    if git_has_changes(PROD_REPO, ignore=_PROD_DIRTY_IGNORE):
+        if dry_run:
+            logger.warning("Production repo has uncommitted changes (dry-run, continuing)")
+        elif force:
             logger.warning(
-                "ABORT: Production repository has uncommitted changes. "
-                "Proceeding anyway because --force was provided."
+                "Production repo has uncommitted changes — "
+                "proceeding because --force was provided."
             )
         else:
             logger.error(
                 "ABORT: Production repository has uncommitted changes. "
-                "Use --force to override."
+                "Only README.md is auto-committed; other changes must be "
+                "resolved manually. Use --force to override."
             )
             return
 
-    involved_rows: List[Dict[str, Any]] = []  # rows that had files copied
-    eligible_rows: List[Dict[str, Any]] = []  # rows that passed prod_due_at gate
-    total_copied = 0
-    skipped: List[tuple[str, str]] = []  # (name, reason) for dry-run
+    involved_rows: List[Dict[str, Any]] = []   # rows that had files replaced
+    eligible_rows: List[Dict[str, Any]] = []   # rows that passed prod_due_at gate
+    total_replaced = 0
+    all_replaced_files: List[str] = []         # for diff summary
+    skipped: List[tuple[str, str]] = []
 
     for row in rows:
         name = row.get("Name", "?")
@@ -763,62 +941,64 @@ def run_prod_phase(
             skipped.append((name, reason))
             continue
 
-        # Row passed the prod_due_at gate → mark as eligible for Notion update
+        # Row passed the prod_due_at gate
         eligible_rows.append(row)
 
-        # Determine include/exclude globs
+        # Content-based comparison (private wins if content differs)
         include_globs = _parse_globs(row.get("include_globs")) or DEFAULT_INCLUDE_GLOBS
         exclude_globs = _parse_globs(row.get("exclude_globs"))
-
-        # Determine since timestamp
-        since = _parse_iso_datetime(row.get("last_prod_run_at"))
         logger.debug(
-            "Row %s: last_prod_run_at=%s  include=%s  exclude=%s",
-            name,
-            since.isoformat(timespec="seconds") if since else "None",
-            include_globs, exclude_globs,
+            "Row %s: include=%s  exclude=%s",
+            name, include_globs, exclude_globs,
         )
 
         try:
-            files = collect_eligible_files(
-                PRIVATE_REPO,
-                src_path,
+            differing = _collect_differing_files(
+                PRIVATE_REPO, src_path,
+                PROD_REPO, dst_path,
                 include_globs=include_globs,
                 exclude_globs=exclude_globs,
-                since=since,
-                now_jst=now_jst,
             )
         except Exception as e:
-            logger.error("Row %s: error collecting files: %s", name, e)
+            logger.error("Row %s: error comparing files: %s", name, e)
             skipped.append((name, f"error: {e}"))
             continue
 
-        if not files:
-            logger.info("Row %s: no eligible files (already up-to-date)", name)
+        if not differing:
+            logger.info("Row %s: all files up-to-date (no content differences)", name)
             continue
 
-        logger.info("Row %s: %d eligible files", name, len(files))
-        for f in files[:10]:
-            logger.debug("  %s", f)
-        if len(files) > 10:
-            logger.debug("  ... and %d more", len(files) - 10)
+        logger.info("Row %s: %d file(s) differ", name, len(differing))
+        for f in differing[:20]:
+            logger.debug("  %s/%s", dst_path, f)
+        if len(differing) > 20:
+            logger.debug("  ... and %d more", len(differing) - 20)
+
+        # Build list of replaced file paths (for summary logging)
+        src_base = PRIVATE_REPO / src_path
+        for f in differing:
+            if src_base.is_file():
+                all_replaced_files.append(dst_path)
+            else:
+                all_replaced_files.append(f"{dst_path}/{f}")
 
         if dry_run:
             involved_rows.append(row)
-            total_copied += len(files)
+            total_replaced += len(differing)
             continue
 
+        # Replace prod files with private versions
         try:
-            n = copy_files_to_prod(files, PRIVATE_REPO, src_path, PROD_REPO, dst_path)
+            n = copy_files_to_prod(differing, PRIVATE_REPO, src_path, PROD_REPO, dst_path)
             if n > 0:
                 involved_rows.append(row)
-                total_copied += n
-                logger.info("Row %s: copied %d files", name, n)
+                total_replaced += n
+                logger.info("Row %s: replaced %d file(s)", name, n)
         except Exception as e:
-            logger.error("Row %s: error copying files: %s", name, e)
+            logger.error("Row %s: error replacing files: %s", name, e)
 
     logger.info(
-        "Production phase: %d eligible (passed gate), %d with files copied, %d skipped",
+        "Production phase: %d eligible (passed gate), %d with files replaced, %d skipped",
         len(eligible_rows), len(involved_rows), len(skipped),
     )
 
@@ -827,28 +1007,34 @@ def run_prod_phase(
         logger.info("--- Dry-run: Production Phase Summary ---")
         for row in involved_rows:
             name = row.get("Name", "?")
-            logger.info("  [COPY] %s", name)
+            logger.info("  [REPLACE] %s", name)
         for row in eligible_rows:
             if row not in involved_rows:
                 name = row.get("Name", "?")
-                logger.info("  [GATE-PASSED, no files] %s", name)
+                logger.info("  [UP-TO-DATE] %s", name)
         for name, reason in skipped:
             logger.info("  [SKIP] %s — %s", name, reason)
-        if involved_rows:
-            msg = _build_prod_commit_msg(involved_rows)
-            logger.info("Commit message: %s", msg)
-            logger.info("Total files to copy: %d", total_copied)
+        if all_replaced_files:
+            logger.info("Files that would be replaced:")
+            for f in sorted(all_replaced_files):
+                logger.info("    %s", f)
+            logger.info("Total: %d", total_replaced)
         else:
-            logger.info("No files to copy — no commit")
+            logger.info("No files differ — nothing to replace")
         logger.info("Notion updates (last_prod_run_at): %d rows (all gate-passed)", len(eligible_rows))
         logger.info("--- End Dry-run Summary ---")
         return
 
-    # ---- live: commit & push (only if files were actually copied) ----
+    # ---- live: diff summary + commit & push ----
     if involved_rows:
-        msg = _build_prod_commit_msg(involved_rows)
+        logger.info("--- Diff Summary (files replaced) ---")
+        for f in sorted(all_replaced_files):
+            logger.info("  REPLACED: %s", f)
+        logger.info("Total files replaced: %d", total_replaced)
+        logger.info("-------------------------------------")
 
-        git_add_all(PROD_REPO)
+        msg = _build_prod_commit_msg(involved_rows)
+        git_add_all(PROD_REPO, exclude=_PROD_GIT_EXCLUDE)
         if not git_commit(PROD_REPO, msg):
             logger.error("Prod commit failed — skipping push and Notion updates")
             return
@@ -858,8 +1044,6 @@ def run_prod_phase(
             return
 
     # ---- Notion updates for ALL rows that passed the prod_due_at gate ----
-    # Even rows with no files to copy get their timestamps updated,
-    # because the gate condition (now >= prod_due_at) was satisfied.
     if not eligible_rows:
         logger.info("No rows passed prod_due_at gate — no Notion updates")
         return
@@ -945,23 +1129,29 @@ def run_src_sync_phase(
     """
     logger.info("=== Phase D: src/ File Sync ===")
 
+    # Auto-commit README.md before any production sync
+    if not dry_run:
+        if not _commit_readme_if_dirty(PROD_REPO):
+            logger.error("ABORT: Failed to auto-commit README.md — skipping src-sync")
+            return
+
     # Determine which paths Notion rows already cover
     notion_covered = _collect_notion_covered_paths(rows)
     if notion_covered:
         logger.info("Notion-covered paths (%d): %s",
                      len(notion_covered), ", ".join(sorted(notion_covered)))
 
-    # Safety: check prod repo is clean (same as Phase B+C)
-    if not dry_run and git_has_changes(PROD_REPO):
+    # Safety: check prod repo is clean (.DS_Store is ignored)
+    if not dry_run and git_has_changes(PROD_REPO, ignore=_PROD_DIRTY_IGNORE):
         if force:
             logger.warning(
-                "Production repo has uncommitted changes. "
-                "Proceeding anyway because --force was provided."
+                "Production repo has uncommitted changes — "
+                "proceeding because --force was provided."
             )
         else:
             logger.error(
-                "Production repo has uncommitted changes — skipping src-sync. "
-                "Use --force to override."
+                "Production repo has uncommitted changes "
+                "— skipping src-sync. Use --force to override."
             )
             return
 
@@ -1047,7 +1237,7 @@ def run_src_sync_phase(
 
     # ---- Commit & push production ----
     msg = f"src-sync: {copied} file(s) synced from private"
-    git_add_all(PROD_REPO)
+    git_add_all(PROD_REPO, exclude=_PROD_GIT_EXCLUDE)
     if not git_commit(PROD_REPO, msg):
         logger.error("src-sync commit failed — skipping push")
         return

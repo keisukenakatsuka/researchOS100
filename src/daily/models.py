@@ -96,6 +96,8 @@ class MeetingBrief:
     links_materials: str = ""
     status: str = "Draft"
     created_by: str = "Auto"
+    related_event_ids: List[str] = field(default_factory=list)
+    daily_log_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

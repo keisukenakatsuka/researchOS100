@@ -42,6 +42,11 @@ def _number(val: Optional[float | int]) -> dict:
     return {"number": val}
 
 
+def _url(val: Optional[str]) -> dict:
+    """Notion URL property — accepts a single URL string or None."""
+    return {"url": val if val else None}
+
+
 def _select(name: str) -> dict:
     if not name:
         return {"select": None}
@@ -221,6 +226,7 @@ def build_meeting_brief_properties(
     links_materials: str = "",
     status: str = "Draft",
     created_by: str = "Auto",
+    related_event_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Build Notion properties for a Meeting Briefs page."""
     props: Dict[str, Any] = {
@@ -230,7 +236,7 @@ def build_meeting_brief_properties(
         "Created By": _select(created_by),
     }
     if daily_log_id:
-        props["Daily Log"] = _relation([daily_log_id])
+        props["Daily Logs"] = _relation([daily_log_id])
     if people:
         props["People"] = _multi_select(people)
     if purpose:
@@ -244,7 +250,79 @@ def build_meeting_brief_properties(
     if prep_checklist:
         props["Prep Checklist"] = _rich_text(prep_checklist)
     if links_materials:
-        props["Links / Materials"] = _rich_text(links_materials)
+        # "Links / Materials" is a url-type property — extract the first URL.
+        first_url = ""
+        for part in links_materials.replace("- ", "").split("\n"):
+            part = part.strip()
+            if part.startswith("http"):
+                first_url = part
+                break
+        if first_url:
+            props["Links / Materials"] = _url(first_url)
+    if related_event_ids:
+        props["Related Event"] = _relation(related_event_ids)
+    return props
+
+
+def resolve_daily_log_relation_key(
+    props: Dict[str, Any],
+    db_property_names: Optional[set] = None,
+) -> Dict[str, Any]:
+    """Resolve the Daily Log(s) relation key to match the actual DB schema.
+
+    The Meeting Briefs DB uses ``"Daily Logs"`` (plural). Legacy or other DBs
+    may use ``"Daily Log"`` (singular).  This helper renames the key in *props*
+    to whichever variant actually exists in the database, or removes it
+    gracefully if neither is present.
+
+    Parameters
+    ----------
+    props:
+        The property dict (mutated in-place and returned).
+    db_property_names:
+        Set of property names from the target Notion database.  When
+        ``None`` the function returns *props* unchanged (no probing).
+
+    Returns
+    -------
+    The same *props* dict, possibly with the key renamed.
+    """
+    _PREFERRED = "Daily Logs"
+    _FALLBACK = "Daily Log"
+
+    # Nothing to rename
+    if _PREFERRED not in props and _FALLBACK not in props:
+        return props
+
+    # No schema to probe — keep as-is (best-effort)
+    if db_property_names is None:
+        return props
+
+    # Determine which key is currently in props
+    current_key = _PREFERRED if _PREFERRED in props else _FALLBACK
+    relation_value = props[current_key]
+
+    if _PREFERRED in db_property_names:
+        target_key = _PREFERRED
+    elif _FALLBACK in db_property_names:
+        target_key = _FALLBACK
+    else:
+        # Neither variant exists — remove rather than crash
+        import logging
+        logging.getLogger(__name__).warning(
+            "DB has neither '%s' nor '%s' relation property. "
+            "Available: %s  — skipping relation.",
+            _PREFERRED, _FALLBACK,
+            ", ".join(sorted(db_property_names)),
+        )
+        props.pop(current_key, None)
+        return props
+
+    # Rename if necessary
+    if current_key != target_key:
+        props[target_key] = relation_value
+        del props[current_key]
+
     return props
 
 

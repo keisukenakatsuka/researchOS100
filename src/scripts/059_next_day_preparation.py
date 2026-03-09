@@ -72,6 +72,10 @@ from src.daily.io import (
     load_json,
 )
 
+from src.deep_research.session import run_single_pipeline
+from src.deep_research import generate_run_id
+from src.llm.claude_client import ClaudeClient
+
 logger = logging.getLogger("059_next_day_preparation")
 
 SCRIPT_NAME = "059_next_day_preparation"
@@ -567,7 +571,7 @@ function buildPersonRow(mi, idx, person) {
   urlInput.type = 'text';
   urlInput.className = 'url-input';
   urlInput.value = person.url || '';
-  urlInput.placeholder = 'URL';
+  urlInput.placeholder = 'URL (optional)';
   urlInput.addEventListener('change', function() { updateTarget(mi, 'people', idx, 'url', this.value); });
   row.appendChild(urlInput);
 
@@ -1130,6 +1134,229 @@ def _synthesize_meeting_brief(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 5b. DEEP RESEARCH PATH: Generate meeting brief via 073 pipeline
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _build_research_question(meeting: Dict[str, Any]) -> str:
+    """Build a research question from meeting metadata."""
+    title = meeting.get("meeting_title", "")
+    orgs = [o["name"] for o in meeting.get("organizations", []) if o.get("name")]
+    people = [p["name"] for p in meeting.get("people", []) if p.get("name")]
+    topics = [t["name"] for t in meeting.get("topics", []) if t.get("name")]
+
+    parts = []
+    if orgs:
+        parts.append("、".join(orgs))
+    if people:
+        parts.append("、".join(people))
+    if topics:
+        parts.append("、".join(topics))
+
+    target = "、".join(parts) if parts else title
+    return (
+        f"{target}について調べてください。"
+        f"ミーティング「{title}」の準備として、"
+        f"事業概要・最新動向・戦略的ポジション・直近のニュースを調査してください。"
+    )
+
+
+def _init_deep_research_clients() -> Dict[str, Any]:
+    """Initialize clients needed by run_single_pipeline().
+
+    Returns dict with llm_client, search_client, news_client, notion_client,
+    enable_writeback.
+    """
+    llm_client = ClaudeClient()
+
+    search_client = None
+    try:
+        from src.search.google_cse import build_google_cse_from_env
+        search_client = build_google_cse_from_env()
+    except Exception as e:
+        logger.warning("Google CSE client init failed (non-fatal): %s", e)
+
+    news_client = None
+    try:
+        from src.search.newsapi import build_newsapi_from_env
+        news_client = build_newsapi_from_env()
+    except Exception as e:
+        logger.warning("NewsAPI client init failed (non-fatal): %s", e)
+
+    notion_client = None
+    try:
+        from src.notion.client import build_notion_client_from_env
+        notion_client = build_notion_client_from_env()
+    except Exception:
+        pass
+
+    enable_writeback = os.getenv("ENABLE_NOTION_WRITEBACK", "").lower() == "true"
+
+    return {
+        "llm_client": llm_client,
+        "search_client": search_client,
+        "news_client": news_client,
+        "notion_client": notion_client,
+        "enable_writeback": enable_writeback,
+    }
+
+
+def _map_deep_research_to_brief(
+    deep_result: Dict[str, Any],
+    events: List[Dict[str, Any]],
+    meeting: Dict[str, Any],
+    date_iso: str,
+    daily_log_id: str = "",
+) -> MeetingBrief:
+    """Map Deep Research results + Events to a MeetingBrief via LLM."""
+    meeting_title = meeting.get("meeting_title", "Untitled Meeting")
+    people_names = [p["name"] for p in meeting.get("people", []) if p.get("name")]
+
+    # Build research input for the synthesis prompt
+    sections = []
+
+    # Deep Research claims
+    claims = deep_result.get("claims", [])
+    if claims:
+        claim_lines = [f"  - {c.get('statement', '')}" for c in claims if c.get("statement")]
+        if claim_lines:
+            sections.append("## 調査で判明した重要な主張\n" + "\n".join(claim_lines))
+
+    # Deep Research top evidence
+    top_evidence = deep_result.get("top_evidence", [])
+    if top_evidence:
+        ev_lines = [f"  - {e}" for e in top_evidence if e]
+        if ev_lines:
+            sections.append("## 根拠となるエビデンス\n" + "\n".join(ev_lines))
+
+    # Deep Research memo summary
+    memo_summary = deep_result.get("memo_summary", "")
+    if memo_summary:
+        sections.append(f"## 調査概要\n{memo_summary}")
+
+    # Events from Notion
+    if events:
+        ev_parts = [
+            f"  - {ev.get('title', '')} ({ev.get('date', '')}): {ev.get('summary', '')}"
+            for ev in events
+        ]
+        if ev_parts:
+            sections.append("## 内部ナレッジ（Notion Events）\n" + "\n".join(ev_parts))
+
+    research_text = "\n\n".join(sections) if sections else "(リサーチ結果なし)"
+
+    # Reuse the same synthesis prompt as 3-layer research
+    from src.llm.router import build_router_from_env, TASK_REASONING
+    router = build_router_from_env(cache_dir=_LLM_CACHE_DIR)
+
+    orgs_str = ", ".join(
+        o["name"] for o in meeting.get("organizations", []) if o.get("name")
+    ) or "(なし)"
+    people_str = ", ".join(people_names) or "(なし)"
+    topics_str = ", ".join(
+        t["name"] for t in meeting.get("topics", []) if t.get("name")
+    ) or "(なし)"
+
+    user_prompt = (
+        f"会議名: {meeting_title}\n"
+        f"日付: {date_iso}\n"
+        f"目的ヒント: {meeting.get('purpose_hint', '未指定')}\n"
+        f"関連組織: {orgs_str}\n"
+        f"参加者: {people_str}\n"
+        f"トピック: {topics_str}\n\n"
+        f"以下のDeep Research調査結果とイベント情報を統合して、"
+        f"戦略的なブリーフを生成してください。\n"
+        f"Contextでは事実の列挙ではなく、会議の意思決定や議論にどう影響するかまで\n"
+        f"踏み込んでください。\n\n"
+        f"{research_text}"
+    )
+
+    logger.info("Calling LLM for Deep Research brief mapping: '%s'", meeting_title)
+    result = router.call(
+        task_type=TASK_REASONING,
+        system=_BRIEF_SYNTHESIS_SYSTEM,
+        user=user_prompt,
+        model_override="gpt-4o",
+        temperature_override=0.3,
+        use_cache=False,
+    )
+    synth = result.parsed
+
+    # Build source domains string
+    source_domains = deep_result.get("source_domains", [])
+    links_str = "\n".join(f"- {d}" for d in source_domains[:15]) if source_domains else ""
+
+    return MeetingBrief(
+        title=meeting_title,
+        date=date_iso,
+        people=people_names,
+        purpose=synth.get("purpose", ""),
+        context=synth.get("context", ""),
+        key_questions=synth.get("key_questions", ""),
+        desired_outcomes=synth.get("desired_outcomes", ""),
+        prep_checklist=synth.get("prep_checklist", ""),
+        links_materials=links_str,
+        status="Draft",
+        created_by="059_deep_research",
+        related_event_ids=[e.get("page_id", "") for e in events if e.get("page_id")],
+        daily_log_id=daily_log_id,
+    )
+
+
+def _generate_brief_deep_research(
+    meeting: Dict[str, Any],
+    date_iso: str,
+    daily_log_id: str = "",
+) -> MeetingBrief:
+    """Generate a meeting brief via Deep Research pipeline (067-072).
+
+    Raises on failure so caller can fall back to 3-layer research.
+    """
+    question = _build_research_question(meeting)
+    run_id = generate_run_id()
+    clients = _init_deep_research_clients()
+
+    logger.info(
+        "Running Deep Research for '%s' (run_id=%s)",
+        meeting.get("meeting_title", ""), run_id,
+    )
+
+    result = run_single_pipeline(
+        question,
+        run_id,
+        llm_client=clients["llm_client"],
+        search_client=clients["search_client"],
+        news_client=clients["news_client"],
+        notion_client=clients["notion_client"],
+        enable_writeback=clients["enable_writeback"],
+    )
+
+    if result.get("status") == "failed":
+        raise RuntimeError(f"Deep Research pipeline failed: {result.get('error', 'unknown')}")
+
+    # Supplement with Notion Events (Deep Research doesn't search Events DB)
+    all_events = []
+    for org in meeting.get("organizations", []):
+        if org.get("name"):
+            all_events.extend(_search_notion_events(org["name"]))
+    for person in meeting.get("people", []):
+        if person.get("name"):
+            all_events.extend(_search_notion_events(person["name"]))
+
+    brief = _map_deep_research_to_brief(
+        result, all_events, meeting, date_iso, daily_log_id,
+    )
+    logger.info(
+        "Deep Research brief generated: '%s' (sources=%d, evidence=%d, claims=%d)",
+        brief.title,
+        result.get("sources_count", 0),
+        result.get("evidence_count", 0),
+        result.get("claims_count", 0),
+    )
+    return brief
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 6. NOTION OUTPUT: Write Meeting Briefs + update Daily Log
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1562,23 +1789,27 @@ def run_pipeline(
     # All three sources (Events, CSE, NewsAPI) are always executed.
     # --no-external only suppresses Google CSE and NewsAPI at the
     # top-level search functions (graceful no-op if keys are missing).
-    enriched_meetings = []
-    for meeting in meetings:
-        enriched = _research_meeting_cluster(meeting)
-        enriched_meetings.append(enriched)
-
     # ── 5. Look up Daily Log page ID for linking ──
     daily_log_id = _get_daily_log_page_id(date_iso)
     if daily_log_id:
         logger.info("Found Daily Log page: %s", daily_log_id[:8])
 
-    # ── 6. Synthesize meeting briefs ──
+    # ── 6. Synthesize meeting briefs (Deep Research first, fallback to 3-layer) ──
     # Meeting Brief date = date_iso (close date), NOT tomorrow, so that
     # 058 Daily Log, 059 Meeting Briefs, and 060 Morning Commit all
     # share a consistent date key in Notion.
     briefs = []
-    for enriched in enriched_meetings:
-        brief = _synthesize_meeting_brief(enriched, date_iso, daily_log_id=daily_log_id)
+    for meeting in meetings:
+        try:
+            brief = _generate_brief_deep_research(meeting, date_iso, daily_log_id=daily_log_id)
+        except Exception:
+            logger.warning(
+                "Deep Research failed for '%s', falling back to 3-layer research",
+                meeting.get("meeting_title", ""),
+                exc_info=True,
+            )
+            enriched = _research_meeting_cluster(meeting)
+            brief = _synthesize_meeting_brief(enriched, date_iso, daily_log_id=daily_log_id)
         briefs.append(brief)
     logger.info("Generated %d meeting briefs (date=%s)", len(briefs), date_iso)
 

@@ -196,9 +196,9 @@ def _build_html() -> str:
 <title>Plan & Review</title>
 <style>
 :root {{
-  --bg: #0f1117; --surface: #1a1d27; --surface2: #242836;
-  --border: #2e3345; --text: #e4e6ef; --text2: #9399b2;
-  --accent: #7c3aed; --accent-light: #a78bfa;
+  --bg: #ffffff; --surface: #f8f9fa; --surface2: #e9ecef;
+  --border: #dee2e6; --text: #212529; --text2: #6c757d;
+  --accent: #7c3aed; --accent-light: #6d28d9;
   --green: #10b981; --red: #ef4444; --orange: #f59e0b;
   --blue: #3b82f6; --cyan: #06b6d4;
 }}

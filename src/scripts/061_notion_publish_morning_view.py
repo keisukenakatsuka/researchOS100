@@ -418,12 +418,20 @@ def _synthesize_059_briefs(
                 "059 synthesize: [%d/%d] researching + synthesizing '%s'",
                 i + 1, len(meetings), title,
             )
-            # Step 1: 3-layer research (Notion Events, Google CSE, NewsAPI)
-            enriched = mod_059._research_meeting_cluster(meeting)
-            # Step 2: LLM synthesis
-            brief = mod_059._synthesize_meeting_brief(
-                enriched, date_iso, daily_log_id=daily_log_id,
-            )
+            # Deep Research first, fallback to 3-layer research
+            try:
+                brief = mod_059._generate_brief_deep_research(
+                    meeting, date_iso, daily_log_id=daily_log_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Deep Research failed for '%s', falling back to 3-layer",
+                    title, exc_info=True,
+                )
+                enriched = mod_059._research_meeting_cluster(meeting)
+                brief = mod_059._synthesize_meeting_brief(
+                    enriched, date_iso, daily_log_id=daily_log_id,
+                )
             briefs.append(brief.to_dict())
 
         logger.info(
@@ -1477,6 +1485,87 @@ def _build_app():
         threading.Thread(target=_run_gen, daemon=True).start()
         return {"job_key": job_key, "status": "running"}
 
+    # ── Section refresh endpoint (IMP-2) ──
+
+    @app.post("/api/refresh-section/{section}")
+    async def refresh_section(section: str, request_data: dict):
+        """Reload a single section's data from local files."""
+        if section not in ("057", "058", "059", "060"):
+            return JSONResponse({"error": "Invalid section"}, status_code=400)
+        date_iso = request_data.get("date", "")
+        if not _DATE_RE.match(date_iso):
+            return JSONResponse({"error": "Invalid date"}, status_code=400)
+
+        logger.info("Refreshing section %s for %s", section, date_iso)
+        section_data = None
+
+        if section == "057":
+            raw_path = CLOSE_RAW_DIR / date_iso / "close_raw.json"
+            if raw_path.exists():
+                raw = CloseRawInput.from_dict(load_json(raw_path))
+                section_data = {
+                    "raw_text": raw.raw_text,
+                    "satisfaction": raw.satisfaction,
+                    "energy_level": raw.energy_level,
+                    "input_mode": raw.input_mode,
+                }
+        elif section == "058":
+            struct_path = CLOSE_STRUCTURED_DIR / date_iso / "close_structured.json"
+            if struct_path.exists():
+                s = CloseStructured.from_dict(load_json(struct_path))
+                section_data = {
+                    "structured_summary": s.structured_summary,
+                    "provisional_top3": s.provisional_top3,
+                    "friction_blockers": s.friction_blockers,
+                    "open_questions": s.open_questions,
+                    "value_domains": s.value_domains,
+                    "items_count": len(s.items),
+                    "stage": s.stage,
+                }
+        elif section == "059":
+            prep_path = NEXT_DAY_PREP_DIR / date_iso / "next_day_prep.json"
+            if prep_path.exists():
+                p = NextDayPrep.from_dict(load_json(prep_path))
+                section_data = {
+                    "meeting_briefs": [
+                        {
+                            "title": b.title,
+                            "date": b.date,
+                            "people": b.people,
+                            "purpose": b.purpose,
+                            "context": b.context[:300] + "..." if len(b.context) > 300 else b.context,
+                            "key_questions": b.key_questions,
+                            "status": b.status,
+                        }
+                        for b in p.meeting_briefs
+                    ],
+                    "follow_ups_count": len(p.follow_ups),
+                    "monitoring_count": len(p.monitoring_suggestions),
+                }
+        elif section == "060":
+            commit_path = MORNING_COMMIT_DIR / date_iso / "morning_commit.json"
+            if commit_path.exists():
+                raw_commit = load_json(commit_path)
+                m = MorningCommit.from_dict(raw_commit)
+                section_data = {
+                    "final_top3": m.final_top3,
+                    "energy_level": m.energy_level,
+                    "time_budget_hrs": m.time_budget_hrs,
+                    "source_date": raw_commit.get("source_date", ""),
+                    "commits": [
+                        {
+                            "rank": c.rank,
+                            "title": c.title,
+                            "status": c.status,
+                            "planned_time_block": c.planned_time_block,
+                            "estimated_minutes": c.estimated_minutes,
+                        }
+                        for c in m.commits
+                    ],
+                }
+
+        return {"section": section, "data": section_data}
+
     return app
 
 
@@ -1490,9 +1579,9 @@ def _build_html() -> str:
 <title>061 Daily Console</title>
 <style>
 :root {
-  --bg: #0f1117; --surface: #1a1d27; --surface2: #242836;
-  --border: #2e3345; --text: #e4e6ef; --text2: #9399b2;
-  --accent: #7c3aed; --accent-light: #a78bfa;
+  --bg: #ffffff; --surface: #f8f9fa; --surface2: #e9ecef;
+  --border: #dee2e6; --text: #212529; --text2: #6c757d;
+  --accent: #7c3aed; --accent-light: #6d28d9;
   --green: #10b981; --red: #ef4444; --orange: #f59e0b;
   --blue: #3b82f6; --cyan: #06b6d4;
 }
@@ -1785,38 +1874,55 @@ async function loadDateView(dt) {
   renderDateView(dt, data, notion);
 }
 
+var _cachedNotion = null;
+
 function renderDateView(dt, data, notion) {
   const main = document.getElementById('main');
-  let html = '<h1>Daily Log: ' + dt + '</h1>';
+  _cachedNotion = notion;
+  main.innerHTML = '<h1>Daily Log: ' + dt + '</h1>'
+    + '<div class="job-output" id="job-output"></div>'
+    + '<div id="notion-bar-container"></div>'
+    + '<div id="section-060-container"></div>'
+    + '<div id="section-057-container"></div>'
+    + '<div id="section-058-container"></div>'
+    + '<div id="section-059-container"></div>';
+  renderNotionBar(notion);
+  renderSection060(data, notion);
+  renderSection057(data, notion);
+  renderSection058(data);
+  renderSection059(data, notion);
+}
 
-  // (global action bar removed — each section has its own controls)
-  html += '<div class="job-output" id="job-output"></div>';
-
-  // Notion status bar
-  if (notion) {
-    html += '<div class="notion-bar">';
-    if (notion.daily_log) {
-      const dl = notion.daily_log;
-      html += '<span class="label">Notion:</span>';
-      html += '<span class="value">' + (dl.stage || '(no stage)') + '</span>';
-      html += '<span class="label">Publish:</span>';
-      html += '<span class="value">' + (dl.publish_status || 'Draft') + '</span>';
-      if (dl.url) {
-        html += '<a class="notion-link" href="' + dl.url + '" target="_blank">Open in Notion</a>';
-      }
-    } else {
-      html += '<span class="label">Notion:</span>';
-      html += '<span class="value" style="color:var(--text2)">No Daily Log page</span>';
+function renderNotionBar(notion) {
+  var container = document.getElementById('notion-bar-container');
+  if (!container) return;
+  if (!notion) { container.innerHTML = ''; return; }
+  var html = '<div class="notion-bar">';
+  if (notion.daily_log) {
+    var dl = notion.daily_log;
+    html += '<span class="label">Notion:</span>';
+    html += '<span class="value">' + (dl.stage || '(no stage)') + '</span>';
+    html += '<span class="label">Publish:</span>';
+    html += '<span class="value">' + (dl.publish_status || 'Draft') + '</span>';
+    if (dl.url) {
+      html += '<a class="notion-link" href="' + dl.url + '" target="_blank">Open in Notion</a>';
     }
-    if (notion.meeting_briefs && notion.meeting_briefs.length > 0) {
-      html += '<span class="label" style="margin-left:auto">Briefs in Notion:</span>';
-      html += '<span class="value">' + notion.meeting_briefs.length + '</span>';
-    }
-    html += '</div>';
+  } else {
+    html += '<span class="label">Notion:</span>';
+    html += '<span class="value" style="color:var(--text2)">No Daily Log page</span>';
   }
+  if (notion.meeting_briefs && notion.meeting_briefs.length > 0) {
+    html += '<span class="label" style="margin-left:auto">Briefs in Notion:</span>';
+    html += '<span class="value">' + notion.meeting_briefs.length + '</span>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
 
-  // -- 060 Morning Commit (first section) --
-  html += '<div class="section" id="section-060"><h3>060 Morning Commit';
+function renderSection060(data, notion) {
+  var container = document.getElementById('section-060-container');
+  if (!container) return;
+  var html = '<div class="section" id="section-060"><h3>060 Morning Commit';
   if (data.morning_commit) {
     html += ' <span class="badge badge-blue">committed</span>';
   } else {
@@ -1882,9 +1988,22 @@ function renderDateView(dt, data, notion) {
   html += '<div id="commit-status" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>';
   html += '</div>';
   html += '</div>';
+  container.innerHTML = html;
+  // Attach handlers
+  var run060Btn = document.getElementById('btn-run-060');
+  if (run060Btn) {
+    run060Btn.addEventListener('click', function() { run060Generate(currentDate); });
+  }
+  var commitBtn = document.getElementById('btn-commit-060');
+  if (commitBtn) {
+    commitBtn.addEventListener('click', function() { commitMorning(currentDate); });
+  }
+}
 
-  // -- 057 Raw Close Log --
-  html += '<div class="section" id="section-057"><h3>057 Raw Close Log';
+function renderSection057(data, notion) {
+  var container = document.getElementById('section-057-container');
+  if (!container) return;
+  var html = '<div class="section" id="section-057"><h3>057 Raw Close Log';
   // Determine source: Notion page exists = canonical, else local fallback
   var raw057 = null;
   var raw057source = '';
@@ -1983,9 +2102,24 @@ function renderDateView(dt, data, notion) {
   html += '<div id="wizard-status" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>';
   html += '</div>';
   html += '</div>';
+  container.innerHTML = html;
+  // Attach wizard handlers
+  ['done', 'friction', 'tomorrow', 'mind'].forEach(function(key) {
+    var recBtn = document.getElementById('wiz-rec-' + key);
+    if (recBtn) {
+      recBtn.addEventListener('click', function() { toggleWizRecord(key); });
+    }
+  });
+  var wizSubmitBtn = document.getElementById('btn-wizard-submit');
+  if (wizSubmitBtn) {
+    wizSubmitBtn.addEventListener('click', function() { submitWizard(currentDate); });
+  }
+}
 
-  // 058 - Structured
-  html += '<div class="section" id="section-058"><h3>058 Structured Summary';
+function renderSection058(data) {
+  var container = document.getElementById('section-058-container');
+  if (!container) return;
+  var html = '<div class="section" id="section-058"><h3>058 Structured Summary';
   if (data.close_structured) {
     html += ' <span class="badge badge-green">' + data.close_structured.stage + '</span>';
   } else {
@@ -1994,7 +2128,7 @@ function renderDateView(dt, data, notion) {
   html += ' <button class="btn" id="btn-run-058" style="font-size:11px;padding:3px 10px;margin-left:8px">Run 058</button>';
   html += '</h3>';
   if (data.close_structured) {
-    const cs = data.close_structured;
+    var cs = data.close_structured;
     html += '<pre>' + escHtml(cs.structured_summary || '(empty)') + '</pre>';
     if (cs.provisional_top3 && cs.provisional_top3.length > 0) {
       html += '<h3 style="margin-top:14px">Provisional Top 3</h3><ul class="item-list">';
@@ -2015,9 +2149,18 @@ function renderDateView(dt, data, notion) {
     html += '<pre style="color:var(--text2)">No 058 output for this date.</pre>';
   }
   html += '</div>';
+  container.innerHTML = html;
+  // Attach handler
+  var btn058 = document.getElementById('btn-run-058');
+  if (btn058) {
+    btn058.addEventListener('click', function() { runScript('058'); });
+  }
+}
 
-  // -- 059 Meeting Briefs (card-based workflow) --
-  html += '<div class="section" id="section-059"><h3>059 Meeting Briefs';
+function renderSection059(data, notion) {
+  var container = document.getElementById('section-059-container');
+  if (!container) return;
+  var html = '<div class="section" id="section-059"><h3>059 Meeting Briefs';
   var briefCount = 0;
   if (data.next_day_prep) {
     briefCount = data.next_day_prep.meeting_briefs.length;
@@ -2077,52 +2220,46 @@ function renderDateView(dt, data, notion) {
 
   html += '</div>'; // end brief-workflow
   html += '</div>'; // end section-059
-
-  main.innerHTML = html;
-
-  // -- Attach click handlers --
-
-  // 060 Run button (auto-generate from reflection)
-  var run060Btn = document.getElementById('btn-run-060');
-  if (run060Btn) {
-    run060Btn.addEventListener('click', function() { run060Generate(dt); });
-  }
-  // 060 Commit form
-  var commitBtn = document.getElementById('btn-commit-060');
-  if (commitBtn) {
-    commitBtn.addEventListener('click', function() { commitMorning(dt); });
-  }
-  // 057 Wizard: record buttons for each section
-  ['done', 'friction', 'tomorrow', 'mind'].forEach(function(key) {
-    var recBtn = document.getElementById('wiz-rec-' + key);
-    if (recBtn) {
-      recBtn.addEventListener('click', function() { toggleWizRecord(key); });
-    }
-  });
-  // 057 Wizard: submit button
-  var wizSubmitBtn = document.getElementById('btn-wizard-submit');
-  if (wizSubmitBtn) {
-    wizSubmitBtn.addEventListener('click', function() { submitWizard(dt); });
-  }
-  // 058 subprocess (only script still run as subprocess)
-  // 058 inline run button
-  var btn058 = document.getElementById('btn-run-058');
-  if (btn058) {
-    btn058.addEventListener('click', function() { runScript('058'); });
-  }
-
-  // 059 card-based workflow buttons
+  container.innerHTML = html;
+  // Attach handlers
   var extractBtn = document.getElementById('btn-extract-candidates');
   if (extractBtn) {
-    extractBtn.addEventListener('click', function() { extractCandidates(dt); });
+    extractBtn.addEventListener('click', function() { extractCandidates(currentDate); });
   }
   var synthAllBtn = document.getElementById('btn-synthesize-all');
   if (synthAllBtn) {
-    synthAllBtn.addEventListener('click', function() { synthesizeAllBriefs(dt); });
+    synthAllBtn.addEventListener('click', function() { synthesizeAllBriefs(currentDate); });
   }
   var saveAllBtn = document.getElementById('btn-save-all');
   if (saveAllBtn) {
-    saveAllBtn.addEventListener('click', function() { saveAllBriefs(dt); });
+    saveAllBtn.addEventListener('click', function() { saveAllBriefs(currentDate); });
+  }
+}
+
+async function refreshSection(section, date) {
+  try {
+    var resp = await fetch('/api/refresh-section/' + section, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: date}),
+    });
+    var d = await resp.json();
+    var sectionData = {};
+    if (section === '057') {
+      sectionData.close_raw = d.data;
+      renderSection057(sectionData, _cachedNotion);
+    } else if (section === '058') {
+      sectionData.close_structured = d.data;
+      renderSection058(sectionData);
+    } else if (section === '059') {
+      sectionData.next_day_prep = d.data;
+      renderSection059(sectionData, _cachedNotion);
+    } else if (section === '060') {
+      sectionData.morning_commit = d.data;
+      renderSection060(sectionData, _cachedNotion);
+    }
+  } catch(e) {
+    console.error('refreshSection error:', e);
   }
 }
 
@@ -2175,8 +2312,8 @@ function pollJob(jobKey, num) {
           btn.textContent = 'Run ' + num;
         }
         if (d.status === 'done') {
-          // Reload data
-          await loadDateView(currentDate);
+          // Refresh only the affected section
+          await refreshSection(num, currentDate);
         }
       }
     } catch(e) {
@@ -2727,7 +2864,7 @@ async function submitWizard(dt) {
     if (d.ok) {
       statusEl.textContent = 'Close log saved!';
       statusEl.style.color = 'var(--green)';
-      setTimeout(function() { loadDateView(currentDate); }, 800);
+      setTimeout(function() { refreshSection('057', currentDate); }, 800);
     } else {
       statusEl.textContent = 'Error: ' + (d.error || 'Unknown');
       statusEl.style.color = 'var(--red)';
@@ -2754,7 +2891,7 @@ async function run060Generate(dt) {
       poll060RunJob(d.job_key, dt);
     } else if (d.ok) {
       if (statusEl) { statusEl.textContent = 'Proposals generated! Refreshing...'; statusEl.style.color = 'var(--green)'; }
-      setTimeout(function() { loadDateView(currentDate); }, 800);
+      setTimeout(function() { refreshSection('060', currentDate); }, 800);
     } else {
       if (statusEl) { statusEl.textContent = 'Error: ' + (d.error || 'Generation failed'); statusEl.style.color = 'var(--red)'; }
       if (btn) { btn.disabled = false; btn.textContent = 'Run'; btn.className = 'btn'; btn.style.cssText = 'font-size:12px;padding:5px 16px;margin-left:12px;background:var(--accent);color:#fff;border-color:var(--accent)'; }
@@ -2780,7 +2917,7 @@ function poll060RunJob(jobKey, dt) {
             statusEl.textContent = 'Proposals generated! Source: ' + (d.result.source_date || '?') + '. Refreshing...';
             statusEl.style.color = 'var(--green)';
           }
-          setTimeout(function() { loadDateView(currentDate); }, 800);
+          setTimeout(function() { refreshSection('060', currentDate); }, 800);
         } else {
           var errMsg = (d.result && d.result.error) ? d.result.error : (d.output || 'Unknown error');
           if (statusEl) { statusEl.textContent = 'Failed: ' + errMsg; statusEl.style.color = 'var(--red)'; }
@@ -2825,7 +2962,7 @@ async function commitMorning(dt) {
     if (d.ok) {
       statusEl.textContent = 'Morning commit saved!';
       statusEl.style.color = 'var(--green)';
-      setTimeout(function() { loadDateView(currentDate); }, 800);
+      setTimeout(function() { refreshSection('060', currentDate); }, 800);
     } else {
       statusEl.textContent = 'Error: ' + (d.error || 'Unknown');
       statusEl.style.color = 'var(--red)';

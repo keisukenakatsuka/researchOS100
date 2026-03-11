@@ -24,6 +24,7 @@ _MODEL = "claude-sonnet-4-20250514"
 
 VALID_INTENTS = [
     "company_research",
+    "person_research",
     "interview_prep",
     "tech_review",
     "policy_analysis",
@@ -35,6 +36,7 @@ VALID_INTENTS = [
 
 INTENT_DELIVERABLES: Dict[str, List[str]] = {
     "company_research": ["evidence_memo", "company_brief"],
+    "person_research":  ["evidence_memo", "person_brief"],
     "interview_prep":   ["evidence_memo", "interview_brief"],
     "tech_review":      ["evidence_memo", "tech_overview"],
     "policy_analysis":  ["evidence_memo", "issue_brief"],
@@ -54,8 +56,14 @@ produce a structured research plan as a JSON object.
 
 Analyze the request and output the following fields:
 
-- intent: one of [company_research, interview_prep, tech_review, \
-policy_analysis, issue_analysis, general_research]
+- intent: one of [company_research, person_research, interview_prep, \
+tech_review, policy_analysis, issue_analysis, general_research]
+  - Use "company_research" when the request is about a startup, company, \
+corporation, or organization (e.g. business overview, funding, products)
+  - Use "person_research" when the request is about a specific individual \
+(e.g. their career, background, views, expertise, public statements)
+  - Use "interview_prep" when the request is explicitly about preparing \
+for a meeting or interview with someone
 - targets: list of entities to research (companies, people, technologies, etc.)
 - key_questions: 3-7 specific questions the research should answer
 - search_queries: 5-10 search queries, each as an object with:

@@ -44,29 +44,7 @@ Rules:
 Return a JSON object with a single key "questions" containing a list of strings.
 Return ONLY a JSON object. No markdown fences, no explanation."""
 
-_ANSWER_SYSTEM = """\
-You are a research synthesis assistant producing detailed research reports.
-Given multiple research run results (claims, evidence, memos, sources),
-generate a detailed research report answering the user's original question
-in Japanese.
-
-## Output Structure
-
-Use the following sections as a template. Include every section that has
-relevant information. Skip a section ONLY if the research contains absolutely
-no material for it. For skipped sections, do NOT add a placeholder.
-
-1. **エグゼクティブサマリー** — 3-5 sentences covering the most critical findings.
-2. **企業・対象の概要** — Background, history, founding, mission, positioning.
-3. **製品・技術・サービス** — Offerings, technical differentiators, strengths.
-4. **顧客・導入事例・パートナーシップ** — Key clients, use cases, partnerships.
-5. **資金調達・収益・成長指標** — Funding rounds, revenue signals, growth.
-6. **地域展開・組織体制** — Geographic presence, leadership, team.
-7. **競合・市場ポジション** — Competitive landscape, market positioning.
-8. **最近の動向とその意味合い** — Recent news with analysis of implications.
-9. **リスク・不確実性・未確認事項** — What is uncertain or unverified.
-10. **総合評価と示唆** — Overall assessment and actionable implications.
-11. **主な情報源** — List of source domains used.
+_ANSWER_WRITING_RULES = """\
 
 ## Writing Rules
 
@@ -93,6 +71,90 @@ no material for it. For skipped sections, do NOT add a placeholder.
 - Do NOT omit numbers, dates, or proper nouns that appear in the evidence.
 
 Return the report as plain text with Markdown headings (not JSON)."""
+
+_ANSWER_SYSTEM_COMPANY = """\
+You are a research synthesis assistant producing detailed research reports.
+Given multiple research run results (claims, evidence, memos, sources),
+generate a detailed research report answering the user's original question
+in Japanese.
+
+## Output Structure
+
+Use the following sections as a template. Include every section that has
+relevant information. Skip a section ONLY if the research contains absolutely
+no material for it. For skipped sections, do NOT add a placeholder.
+
+1. **エグゼクティブサマリー** — 3-5 sentences covering the most critical findings.
+2. **企業・対象の概要** — Background, history, founding, mission, positioning.
+3. **製品・技術・サービス** — Offerings, technical differentiators, strengths.
+4. **顧客・導入事例・パートナーシップ** — Key clients, use cases, partnerships.
+5. **資金調達・収益・成長指標** — Funding rounds, revenue signals, growth.
+6. **地域展開・組織体制** — Geographic presence, leadership, team.
+7. **競合・市場ポジション** — Competitive landscape, market positioning.
+8. **最近の動向とその意味合い** — Recent news with analysis of implications.
+9. **リスク・不確実性・未確認事項** — What is uncertain or unverified.
+10. **総合評価と示唆** — Overall assessment and actionable implications.
+11. **主な情報源** — List of source domains used.
+""" + _ANSWER_WRITING_RULES
+
+_ANSWER_SYSTEM_PERSON = """\
+You are a research synthesis assistant producing detailed person research reports.
+Given multiple research run results (claims, evidence, memos, sources),
+generate a detailed person research report answering the user's original question
+in Japanese.
+
+## Output Structure
+
+Use the following sections as a template. Include every section that has
+relevant information. Skip a section ONLY if the research contains absolutely
+no material for it. For skipped sections, do NOT add a placeholder.
+
+1. **エグゼクティブサマリー** — 3-5 sentences summarizing who this person is and why they matter.
+2. **基本プロフィール** — Full name, birth year, nationality, birthplace, and other basic facts.
+3. **学歴・教育背景** — Universities, degrees, majors, study abroad, academic honors.
+4. **職歴・経歴** — Chronological career history, key career transitions, notable roles.
+5. **所属組織・役職歴** — Board memberships, advisory roles, affiliations with organizations.
+6. **専門領域・研究分野・関心領域** — Areas of expertise, research themes, intellectual interests.
+7. **主要な発言・主張・思想** — Published statements, positions, op-eds, notable quotes.
+8. **メディア露出・講演・執筆** — Media appearances, conference talks, books, articles, SNS presence.
+9. **人脈・関係性** — Co-founders, mentors, key collaborators, professional network.
+10. **人物像の総合評価と示唆** — Overall assessment of the person and actionable implications.
+11. **リスク・不確実性・未確認事項** — What is uncertain or unverified about this person.
+12. **主な情報源** — List of source domains used.
+""" + _ANSWER_WRITING_RULES
+
+_ANSWER_SYSTEM_GENERAL = """\
+You are a research synthesis assistant producing detailed research reports.
+Given multiple research run results (claims, evidence, memos, sources),
+generate a detailed research report answering the user's original question
+in Japanese.
+
+## Output Structure
+
+Use the following sections as a template. Include every section that has
+relevant information. Skip a section ONLY if the research contains absolutely
+no material for it. For skipped sections, do NOT add a placeholder.
+
+1. **エグゼクティブサマリー** — 3-5 sentences covering the most critical findings.
+2. **背景・概要** — Background context, definitions, scope of the topic.
+3. **主要な調査結果** — Key findings organized by sub-topic or theme.
+4. **分析・考察** — Analysis, implications, and interpretation of findings.
+5. **最近の動向とその意味合い** — Recent developments and their significance.
+6. **リスク・不確実性・未確認事項** — What is uncertain or unverified.
+7. **総合評価と示唆** — Overall assessment and actionable implications.
+8. **主な情報源** — List of source domains used.
+""" + _ANSWER_WRITING_RULES
+
+# intent → answer system prompt mapping
+_ANSWER_SYSTEMS: Dict[str, str] = {
+    "company_research": _ANSWER_SYSTEM_COMPANY,
+    "person_research":  _ANSWER_SYSTEM_PERSON,
+    "interview_prep":   _ANSWER_SYSTEM_PERSON,
+    "tech_review":      _ANSWER_SYSTEM_GENERAL,
+    "policy_analysis":  _ANSWER_SYSTEM_GENERAL,
+    "issue_analysis":   _ANSWER_SYSTEM_GENERAL,
+}
+_ANSWER_SYSTEM_DEFAULT = _ANSWER_SYSTEM_GENERAL
 
 # -- progress labels (Japanese) -----------------------------------------------
 
@@ -226,6 +288,7 @@ def run_single_pipeline(
         "question": question,
         "run_id": run_id,
         "status": "failed",
+        "intent": "general_research",
         "error": None,
         "sources_count": 0,
         "evidence_count": 0,
@@ -241,6 +304,7 @@ def run_single_pipeline(
         _print_step(1, 6, "067")
         plan = run_planner(question, llm_client, run_id=run_id, notion_client=notion_client)
         save_step_output(run_id, "067", plan.to_dict())
+        result["intent"] = plan.intent
 
         # Step 068: Collector
         _print_step(2, 6, "068")
@@ -366,8 +430,13 @@ def generate_final_answer(
     aggregated: Dict[str, Any],
     run_results: List[Dict[str, Any]],
     llm_client: Any,
+    intent: str = "general_research",
 ) -> str:
     """Generate a unified final answer from aggregated results."""
+    # Select system prompt based on intent
+    system_prompt = _ANSWER_SYSTEMS.get(intent, _ANSWER_SYSTEM_DEFAULT)
+    logger.info("Final answer: using %s framework (intent=%s)", intent, intent)
+
     # Build context for LLM
     context_parts: List[str] = []
     context_parts.append(f"User question: {original_question}")
@@ -393,7 +462,7 @@ def generate_final_answer(
     body = {
         "model": _LLM_MODEL,
         "max_tokens": 8192,
-        "system": _ANSWER_SYSTEM,
+        "system": system_prompt,
         "messages": [{"role": "user", "content": user_msg}],
     }
 
@@ -641,10 +710,18 @@ def run_session(
         final_answer = "すべての調査が失敗しました。しばらく時間をおいて再度お試しください。"
         status = "failed"
     else:
+        # Determine dominant intent from completed runs
+        session_intent = "general_research"
+        for r in run_results:
+            if r["status"] == "completed":
+                session_intent = r.get("intent", "general_research")
+                break
+
         print()
         print("統合回答を生成中...")
         final_answer = generate_final_answer(
             question, aggregated, run_results, llm_client,
+            intent=session_intent,
         )
         if failed > 0:
             final_answer += (

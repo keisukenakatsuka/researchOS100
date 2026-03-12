@@ -12,6 +12,7 @@ import json
 import logging
 import string
 import random
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,7 @@ from src.deep_research import (
     generate_run_id,
     save_step_output,
 )
+from src.deep_research.frameworks import get_framework_by_id, get_framework_by_intent
 
 logger = logging.getLogger("073_session")
 
@@ -43,118 +45,6 @@ Rules:
 
 Return a JSON object with a single key "questions" containing a list of strings.
 Return ONLY a JSON object. No markdown fences, no explanation."""
-
-_ANSWER_WRITING_RULES = """\
-
-## Writing Rules
-
-- Write entirely in Japanese.
-- Each section: write 2-5 substantive paragraphs, not just bullet points.
-  Bullet lists are fine for enumerating items (products, clients) but MUST be
-  wrapped with explanatory paragraphs giving context, background, or analysis.
-- Be evidence-based: cite specific facts, numbers, dates, names from the
-  research. After key facts, note the source in parentheses
-  (e.g., (eurekarobotics.com)).
-- Distinguish fact from interpretation: mark speculation with
-  「〜と推測される」「〜の可能性がある」.
-- If information for a section is limited, explicitly state
-  「この領域については公開情報が限定的である」 and briefly note what is known.
-- Aim for a report length of 3000-5000 Japanese characters.
-
-## Prohibitions (anti-summarization)
-
-- Do NOT compress multiple distinct facts into a single sentence.
-- Do NOT use vague quantifiers (「様々な」「多くの」「いくつかの」) when
-  specific items are available in the evidence.
-- Do NOT skip details that are present in the evidence.
-- Do NOT produce a short summary. This is a detailed report, not an abstract.
-- Do NOT omit numbers, dates, or proper nouns that appear in the evidence.
-
-Return the report as plain text with Markdown headings (not JSON)."""
-
-_ANSWER_SYSTEM_COMPANY = """\
-You are a research synthesis assistant producing detailed research reports.
-Given multiple research run results (claims, evidence, memos, sources),
-generate a detailed research report answering the user's original question
-in Japanese.
-
-## Output Structure
-
-Use the following sections as a template. Include every section that has
-relevant information. Skip a section ONLY if the research contains absolutely
-no material for it. For skipped sections, do NOT add a placeholder.
-
-1. **エグゼクティブサマリー** — 3-5 sentences covering the most critical findings.
-2. **企業・対象の概要** — Background, history, founding, mission, positioning.
-3. **製品・技術・サービス** — Offerings, technical differentiators, strengths.
-4. **顧客・導入事例・パートナーシップ** — Key clients, use cases, partnerships.
-5. **資金調達・収益・成長指標** — Funding rounds, revenue signals, growth.
-6. **地域展開・組織体制** — Geographic presence, leadership, team.
-7. **競合・市場ポジション** — Competitive landscape, market positioning.
-8. **最近の動向とその意味合い** — Recent news with analysis of implications.
-9. **リスク・不確実性・未確認事項** — What is uncertain or unverified.
-10. **総合評価と示唆** — Overall assessment and actionable implications.
-11. **主な情報源** — List of source domains used.
-""" + _ANSWER_WRITING_RULES
-
-_ANSWER_SYSTEM_PERSON = """\
-You are a research synthesis assistant producing detailed person research reports.
-Given multiple research run results (claims, evidence, memos, sources),
-generate a detailed person research report answering the user's original question
-in Japanese.
-
-## Output Structure
-
-Use the following sections as a template. Include every section that has
-relevant information. Skip a section ONLY if the research contains absolutely
-no material for it. For skipped sections, do NOT add a placeholder.
-
-1. **エグゼクティブサマリー** — 3-5 sentences summarizing who this person is and why they matter.
-2. **基本プロフィール** — Full name, birth year, nationality, birthplace, and other basic facts.
-3. **学歴・教育背景** — Universities, degrees, majors, study abroad, academic honors.
-4. **職歴・経歴** — Chronological career history, key career transitions, notable roles.
-5. **所属組織・役職歴** — Board memberships, advisory roles, affiliations with organizations.
-6. **専門領域・研究分野・関心領域** — Areas of expertise, research themes, intellectual interests.
-7. **主要な発言・主張・思想** — Published statements, positions, op-eds, notable quotes.
-8. **メディア露出・講演・執筆** — Media appearances, conference talks, books, articles, SNS presence.
-9. **人脈・関係性** — Co-founders, mentors, key collaborators, professional network.
-10. **人物像の総合評価と示唆** — Overall assessment of the person and actionable implications.
-11. **リスク・不確実性・未確認事項** — What is uncertain or unverified about this person.
-12. **主な情報源** — List of source domains used.
-""" + _ANSWER_WRITING_RULES
-
-_ANSWER_SYSTEM_GENERAL = """\
-You are a research synthesis assistant producing detailed research reports.
-Given multiple research run results (claims, evidence, memos, sources),
-generate a detailed research report answering the user's original question
-in Japanese.
-
-## Output Structure
-
-Use the following sections as a template. Include every section that has
-relevant information. Skip a section ONLY if the research contains absolutely
-no material for it. For skipped sections, do NOT add a placeholder.
-
-1. **エグゼクティブサマリー** — 3-5 sentences covering the most critical findings.
-2. **背景・概要** — Background context, definitions, scope of the topic.
-3. **主要な調査結果** — Key findings organized by sub-topic or theme.
-4. **分析・考察** — Analysis, implications, and interpretation of findings.
-5. **最近の動向とその意味合い** — Recent developments and their significance.
-6. **リスク・不確実性・未確認事項** — What is uncertain or unverified.
-7. **総合評価と示唆** — Overall assessment and actionable implications.
-8. **主な情報源** — List of source domains used.
-""" + _ANSWER_WRITING_RULES
-
-# intent → answer system prompt mapping
-_ANSWER_SYSTEMS: Dict[str, str] = {
-    "company_research": _ANSWER_SYSTEM_COMPANY,
-    "person_research":  _ANSWER_SYSTEM_PERSON,
-    "interview_prep":   _ANSWER_SYSTEM_PERSON,
-    "tech_review":      _ANSWER_SYSTEM_GENERAL,
-    "policy_analysis":  _ANSWER_SYSTEM_GENERAL,
-    "issue_analysis":   _ANSWER_SYSTEM_GENERAL,
-}
-_ANSWER_SYSTEM_DEFAULT = _ANSWER_SYSTEM_GENERAL
 
 # -- progress labels (Japanese) -----------------------------------------------
 
@@ -225,11 +115,26 @@ def decompose_question(
 # -- user confirmation --------------------------------------------------------
 
 
-def confirm_questions(questions: List[str]) -> str:
+def confirm_questions(
+    questions: List[str],
+    llm_client: Any,
+) -> List[str]:
     """Display decomposed questions and get user confirmation.
 
-    Returns 'y', 'e', or 'n'.
+    Returns the (possibly re-decomposed) question list, or an empty list
+    if the user cancels.
+
+    If stdin is not a TTY (e.g. cron, pipe), logs a warning and returns
+    the original questions without blocking.
     """
+    # stdin guard: avoid hanging in non-interactive environments
+    if not sys.stdin.isatty():
+        logger.warning(
+            "--confirm-plan was requested but stdin is not a TTY. "
+            "Auto-accepting %d questions.", len(questions),
+        )
+        return questions
+
     print()
     print("以下の調査を実行します:")
     print()
@@ -239,8 +144,18 @@ def confirm_questions(questions: List[str]) -> str:
 
     while True:
         choice = input("この内容で調査を開始しますか？ [y/e/n]: ").strip().lower()
-        if choice in ("y", "e", "n", ""):
-            return choice if choice else "n"
+        if choice == "y":
+            return questions
+        if choice == "" or choice == "n":
+            return []
+        if choice == "e":
+            new_question = input("質問を再入力してください: ").strip()
+            if not new_question:
+                return []
+            print()
+            print("質問を分解しています...")
+            new_questions = decompose_question(new_question, llm_client)
+            return confirm_questions(new_questions, llm_client)
         print("  y=実行, e=編集, n=キャンセル")
 
 
@@ -289,6 +204,9 @@ def run_single_pipeline(
         "run_id": run_id,
         "status": "failed",
         "intent": "general_research",
+        "topic": "",
+        "subtype": "",
+        "framework_id": "",
         "error": None,
         "sources_count": 0,
         "evidence_count": 0,
@@ -305,6 +223,9 @@ def run_single_pipeline(
         plan = run_planner(question, llm_client, run_id=run_id, notion_client=notion_client)
         save_step_output(run_id, "067", plan.to_dict())
         result["intent"] = plan.intent
+        result["topic"] = plan.topic
+        result["subtype"] = plan.subtype
+        result["framework_id"] = plan.framework_id
 
         # Step 068: Collector
         _print_step(2, 6, "068")
@@ -431,11 +352,17 @@ def generate_final_answer(
     run_results: List[Dict[str, Any]],
     llm_client: Any,
     intent: str = "general_research",
+    framework_id: str = "",
 ) -> str:
     """Generate a unified final answer from aggregated results."""
-    # Select system prompt based on intent
-    system_prompt = _ANSWER_SYSTEMS.get(intent, _ANSWER_SYSTEM_DEFAULT)
-    logger.info("Final answer: using %s framework (intent=%s)", intent, intent)
+    # Select system prompt: prefer framework_id, fall back to intent
+    if framework_id:
+        fw = get_framework_by_id(framework_id)
+        logger.info("Final answer: using framework=%s (framework_id=%s)", fw.framework_id, framework_id)
+    else:
+        fw = get_framework_by_intent(intent)
+        logger.info("Final answer: using framework=%s (intent=%s)", fw.framework_id, intent)
+    system_prompt = fw.answer_system_prompt
 
     # Build context for LLM
     context_parts: List[str] = []
@@ -616,15 +543,20 @@ def run_session(
     news_client: Any = None,
     notion_client: Any = None,
     enable_writeback: bool = False,
+    confirm_plan: bool = False,
 ) -> Dict[str, Any]:
     """Execute a full research session.
 
     1. Decompose the user question
-    2. Get user confirmation
+    2. Confirm plan (only when confirm_plan=True)
     3. Run pipeline for each question
     4. Aggregate results
     5. Generate final answer
     6. Save and display
+
+    Args:
+        confirm_plan: If True, prompt the user to confirm decomposed
+            questions before execution. Defaults to False (auto-execute).
 
     Returns session metadata dict.
     """
@@ -637,47 +569,23 @@ def run_session(
     print("質問を分解しています...")
     questions = decompose_question(question, llm_client)
 
-    # 2. Confirm
-    choice = confirm_questions(questions)
-
-    if choice == "n":
-        print("セッションを終了しました。")
-        session_dir = save_session(
-            session_id, question, questions, [], "", "cancelled", created_at,
-        )
-        return {
-            "session_id": session_id,
-            "status": "cancelled",
-            "output_path": str(session_dir),
-        }
-
-    if choice == "e":
-        # Re-input question
-        new_question = input("質問を再入力してください: ").strip()
-        if not new_question:
-            print("セッションを終了しました。")
-            return {
-                "session_id": session_id,
-                "status": "cancelled",
-                "output_path": "",
-            }
-        question = new_question
-        print()
-        print("質問を分解しています...")
-        questions = decompose_question(question, llm_client)
-
-        # Re-confirm
-        choice2 = confirm_questions(questions)
-        if choice2 != "y":
+    # 2. Confirm (only when confirm_plan=True)
+    if confirm_plan:
+        questions = confirm_questions(questions, llm_client)
+        if not questions:
             print("セッションを終了しました。")
             session_dir = save_session(
-                session_id, question, questions, [], "", "cancelled", created_at,
+                session_id, question, [], [], "", "cancelled", created_at,
             )
             return {
                 "session_id": session_id,
                 "status": "cancelled",
                 "output_path": str(session_dir),
             }
+    else:
+        logger.info("Auto-executing %d decomposed questions", len(questions))
+        for i, q in enumerate(questions, 1):
+            logger.info("  Q%d: %s", i, q)
 
     # 3. Execute pipeline for each question
     print()
@@ -710,11 +618,13 @@ def run_session(
         final_answer = "すべての調査が失敗しました。しばらく時間をおいて再度お試しください。"
         status = "failed"
     else:
-        # Determine dominant intent from completed runs
+        # Determine dominant intent and framework_id from completed runs
         session_intent = "general_research"
+        session_framework_id = ""
         for r in run_results:
             if r["status"] == "completed":
                 session_intent = r.get("intent", "general_research")
+                session_framework_id = r.get("framework_id", "")
                 break
 
         print()
@@ -722,6 +632,7 @@ def run_session(
         final_answer = generate_final_answer(
             question, aggregated, run_results, llm_client,
             intent=session_intent,
+            framework_id=session_framework_id,
         )
         if failed > 0:
             final_answer += (

@@ -41,6 +41,22 @@ logger = logging.getLogger(__name__)
 
 JST = ZoneInfo("Asia/Tokyo")
 
+# Value Domains — same list as 061's 057 section
+VALUE_DOMAINS = [
+    {"en": "Health", "ja": "健康"},
+    {"en": "Family", "ja": "家族"},
+    {"en": "Work", "ja": "仕事"},
+    {"en": "Learning", "ja": "学び"},
+    {"en": "Creativity", "ja": "創造"},
+    {"en": "Connection", "ja": "つながり"},
+    {"en": "Adventure", "ja": "冒険"},
+    {"en": "Freedom", "ja": "自由"},
+    {"en": "Contribution", "ja": "貢献"},
+    {"en": "Growth", "ja": "成長"},
+    {"en": "Integrity", "ja": "誠実"},
+    {"en": "Gratitude", "ja": "感謝"},
+]
+
 
 # ── Dataclasses ───────────────────────────────────────────────────
 
@@ -516,6 +532,8 @@ def _build_period_html(config: PeriodWebUIConfig) -> str:
         ensure_ascii=False,
     )
 
+    value_domains_json = json.dumps(VALUE_DOMAINS, ensure_ascii=False)
+
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -524,9 +542,9 @@ def _build_period_html(config: PeriodWebUIConfig) -> str:
 <title>{config.script_id} {config.title}</title>
 <style>
 :root {{
-  --bg: #0f1117; --surface: #1a1d27; --surface2: #242836;
-  --border: #2e3345; --text: #e4e6ef; --text2: #9399b2;
-  --accent: #7c3aed; --accent-light: #a78bfa;
+  --bg: #ffffff; --surface: #f8f9fa; --surface2: #e9ecef;
+  --border: #dee2e6; --text: #212529; --text2: #6c757d;
+  --accent: #7c3aed; --accent-light: #6d28d9;
   --green: #10b981; --red: #ef4444; --orange: #f59e0b;
   --blue: #3b82f6; --cyan: #06b6d4;
 }}
@@ -782,6 +800,7 @@ const CONFIG = {{
   scoreFields: {score_fields_json},
   existingFieldNames: {existing_field_names},
   planningContextFields: {planning_context_fields_json},
+  valueDomains: {value_domains_json},
 }};
 
 let mediaRecorders = {{}};
@@ -799,7 +818,20 @@ document.addEventListener('DOMContentLoaded', async () => {{
 // ── Render wizard sections ──
 function renderWizardSections() {{
   const container = document.getElementById('wizard-sections');
-  container.innerHTML = CONFIG.sections.map(sec => `
+  container.innerHTML = CONFIG.sections.map(sec => {{
+    if (sec.input_type === 'value_domains') {{
+      const checkboxes = CONFIG.valueDomains.map(vd =>
+        `<label style="display:flex;align-items:center;gap:4px;font-size:13px;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;cursor:pointer">` +
+        `<input type="checkbox" class="vd-check-${{sec.key}}" value="${{vd.en}}" style="accent-color:var(--accent);width:16px;height:16px">` +
+        `${{vd.en}} (${{vd.ja}})` +
+        `</label>`
+      ).join('');
+      return `<div class="section-card" id="section-${{sec.key}}">` +
+        `<h3>${{sec.title_ja}}</h3>` +
+        `<div style="display:flex;flex-wrap:wrap;gap:6px">${{checkboxes}}</div>` +
+        `</div>`;
+    }}
+    return `
     <div class="section-card" id="section-${{sec.key}}">
       <h3>${{sec.title_ja}}</h3>
       <textarea id="text-${{sec.key}}" placeholder="${{sec.title_en}}..."
@@ -811,8 +843,8 @@ function renderWizardSections() {{
         </button>
         <span class="rec-status" id="rec-status-${{sec.key}}"></span>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }}).join('');
 }}
 
 // ── Render score fields ──
@@ -981,7 +1013,13 @@ async function submitAll() {{
   // Collect section texts
   const sections = {{}};
   for (const sec of CONFIG.sections) {{
-    sections[sec.key] = document.getElementById(`text-${{sec.key}}`).value;
+    if (sec.input_type === 'value_domains') {{
+      const checked = [];
+      document.querySelectorAll(`.vd-check-${{sec.key}}:checked`).forEach(cb => checked.push(cb.value));
+      sections[sec.key] = checked.join(', ');
+    }} else {{
+      sections[sec.key] = document.getElementById(`text-${{sec.key}}`).value;
+    }}
   }}
 
   // Collect score values

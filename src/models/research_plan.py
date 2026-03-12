@@ -26,11 +26,15 @@ class ResearchPlan:
     recalled_evidence_ids: list[str] = field(default_factory=list)
     recalled_claim_ids: list[str] = field(default_factory=list)
     constraints: dict = field(default_factory=dict)
+    # Phase 2: topic-adaptive taxonomy fields (populated by planner in Phase 3)
+    topic: str = ""           # e.g. "company", "person", "market"
+    subtype: str = ""         # e.g. "startup", "lp", "general"
+    framework_id: str = ""    # e.g. "company.startup" (= "{topic}.{subtype}")
 
     # -- serialization ------------------------------------------------
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "run_id": self.run_id,
             "request": self.request,
             "intent": self.intent,
@@ -43,6 +47,14 @@ class ResearchPlan:
             "recalled_claim_ids": list(self.recalled_claim_ids),
             "constraints": dict(self.constraints),
         }
+        # Only include taxonomy fields when populated (backward compat)
+        if self.topic:
+            d["topic"] = self.topic
+        if self.subtype:
+            d["subtype"] = self.subtype
+        if self.framework_id:
+            d["framework_id"] = self.framework_id
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> ResearchPlan:
@@ -64,4 +76,7 @@ class ResearchPlan:
             recalled_evidence_ids=d.get("recalled_evidence_ids", []),
             recalled_claim_ids=d.get("recalled_claim_ids", []),
             constraints=d.get("constraints", {}),
+            topic=d.get("topic", ""),
+            subtype=d.get("subtype", ""),
+            framework_id=d.get("framework_id", ""),
         )

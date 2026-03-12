@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from src.models.research_plan import ResearchPlan
 from src.deep_research import generate_run_id
+from src.deep_research.frameworks import get_framework
 
 logger = logging.getLogger("067_planner")
 
@@ -20,7 +21,27 @@ logger = logging.getLogger("067_planner")
 _MODEL = "claude-sonnet-4-20250514"
 
 
-# ── Intent types ────────────────────────────────────────────────────
+# ── Topic / subtype taxonomy ───────────────────────────────────────
+
+VALID_TOPICS = [
+    "company",
+    "person",
+    "market",
+    "technology",
+    "policy",
+    "product",
+]
+
+VALID_SUBTYPES: Dict[str, List[str]] = {
+    "company":    ["startup", "enterprise", "lp", "vc", "academic", "general"],
+    "person":     ["executive", "academic_person", "investor_person", "public_figure", "general"],
+    "market":     ["general"],
+    "technology": ["general"],
+    "policy":     ["general"],
+    "product":    ["general"],
+}
+
+# ── Legacy intent types (kept for backward compatibility) ──────────
 
 VALID_INTENTS = [
     "company_research",
@@ -32,16 +53,26 @@ VALID_INTENTS = [
     "general_research",
 ]
 
-# ── Intent → Deliverables mapping ──────────────────────────────────
+# intent → (topic, subtype) mapping for legacy fallback
+_INTENT_TO_TOPIC: Dict[str, tuple] = {
+    "company_research": ("company", "general"),
+    "person_research":  ("person", "general"),
+    "interview_prep":   ("person", "general"),
+    "tech_review":      ("technology", "general"),
+    "policy_analysis":  ("policy", "general"),
+    "issue_analysis":   ("general", "general"),
+    "general_research": ("general", "general"),
+}
 
-INTENT_DELIVERABLES: Dict[str, List[str]] = {
-    "company_research": ["evidence_memo", "company_brief"],
-    "person_research":  ["evidence_memo", "person_brief"],
-    "interview_prep":   ["evidence_memo", "interview_brief"],
-    "tech_review":      ["evidence_memo", "tech_overview"],
-    "policy_analysis":  ["evidence_memo", "issue_brief"],
-    "issue_analysis":   ["evidence_memo", "issue_brief"],
-    "general_research": ["evidence_memo"],
+# topic → intent mapping for generating backward-compatible intent
+_TOPIC_TO_INTENT: Dict[str, str] = {
+    "company":    "company_research",
+    "person":     "person_research",
+    "market":     "general_research",
+    "technology": "tech_review",
+    "policy":     "policy_analysis",
+    "product":    "general_research",
+    "general":    "general_research",
 }
 
 # ── Query type categories ──────────────────────────────────────────
@@ -56,14 +87,29 @@ produce a structured research plan as a JSON object.
 
 Analyze the request and output the following fields:
 
-- intent: one of [company_research, person_research, interview_prep, \
-tech_review, policy_analysis, issue_analysis, general_research]
-  - Use "company_research" when the request is about a startup, company, \
-corporation, or organization (e.g. business overview, funding, products)
-  - Use "person_research" when the request is about a specific individual \
-(e.g. their career, background, views, expertise, public statements)
-  - Use "interview_prep" when the request is explicitly about preparing \
-for a meeting or interview with someone
+- topic: one of [company, person, market, technology, policy, product]
+  - "company": any entity with legal personality or organizational substance \
+(startup, enterprise, VC fund, LP/pension fund, university, research institute)
+  - "person": a specific individual (executive, researcher, investor, public figure)
+  - "market": a market, industry, or sector (market size, trends, players)
+  - "technology": a technology, methodology, or technical approach
+  - "policy": a policy, regulation, or institutional framework
+  - "product": a specific product or service (features, competitors, reviews)
+- subtype: refine the topic further
+  - For company: one of [startup, enterprise, lp, vc, academic, general]
+    - "startup": early-stage, high-growth, pre-IPO (Series A/B/C, Y Combinator, etc.)
+    - "enterprise": large/public company, established business
+    - "lp": institutional investor (pension fund, insurance, SWF, endowment)
+    - "vc": venture capital or private equity fund
+    - "academic": university, research institute, think tank
+    - "general": if unsure or does not fit above
+  - For person: one of [executive, academic_person, investor_person, public_figure, general]
+    - "executive": corporate executive, C-suite, board member
+    - "academic_person": professor, researcher, PhD
+    - "investor_person": individual GP, angel investor, fund manager
+    - "public_figure": politician, bureaucrat, journalist
+    - "general": if unsure or does not fit above
+  - For other topics: use "general"
 - targets: list of entities to research (companies, people, technologies, etc.)
 - key_questions: 3-7 specific questions the research should answer
 - search_queries: 5-10 search queries, each as an object with:
@@ -79,7 +125,8 @@ constraints.language accordingly. Generate search_queries in the same
 language as the request, but also include English queries if the topic
 is international.
 
-Do NOT include a "deliverables" field — it will be determined automatically.
+Do NOT include "intent" or "deliverables" fields — they will be determined \
+automatically.
 
 Return ONLY a single JSON object. No markdown fences, no explanation."""
 
@@ -134,8 +181,9 @@ def analyze_request(request: str, llm_client: Any) -> Dict[str, Any]:
             return _fallback_analyze(request)
 
     logger.info(
-        "LLM analysis: intent=%s, targets=%s, queries=%d",
-        analysis.get("intent"),
+        "LLM analysis: topic=%s, subtype=%s, targets=%s, queries=%d",
+        analysis.get("topic"),
+        analysis.get("subtype"),
         analysis.get("targets"),
         len(analysis.get("search_queries", [])),
     )
@@ -156,7 +204,8 @@ def _fallback_analyze(request: str) -> Dict[str, Any]:
     lang = "ja" if is_ja else "en"
 
     return {
-        "intent": "general_research",
+        "topic": "general",
+        "subtype": "general",
         "targets": [request[:60]],
         "key_questions": [
             "この調査対象の概要は？" if is_ja else "What is the overview?",
@@ -235,6 +284,47 @@ def recall_knowledge(
     }
 
 
+def _resolve_topic_subtype(analysis: Dict[str, Any]) -> tuple:
+    """Resolve topic and subtype from LLM analysis with fallback.
+
+    Handles three cases:
+    1. LLM returned topic + subtype (new prompt) → validate and use
+    2. LLM returned intent only (old prompt or cached) → derive from intent
+    3. Neither → default to general/general
+
+    Returns:
+        (topic, subtype) tuple.
+    """
+    topic = analysis.get("topic", "")
+    subtype = analysis.get("subtype", "")
+
+    # Case 1: topic present — validate
+    if topic:
+        if topic not in VALID_TOPICS:
+            logger.warning("Unknown topic '%s', defaulting to general", topic)
+            topic = "general"
+        valid_subs = VALID_SUBTYPES.get(topic, ["general"])
+        if subtype and subtype not in valid_subs:
+            logger.warning(
+                "Unknown subtype '%s' for topic '%s', defaulting to general",
+                subtype, topic,
+            )
+            subtype = "general"
+        if not subtype:
+            subtype = "general"
+        return topic, subtype
+
+    # Case 2: legacy intent present — derive topic/subtype
+    intent = analysis.get("intent", "")
+    if intent and intent in _INTENT_TO_TOPIC:
+        topic, subtype = _INTENT_TO_TOPIC[intent]
+        logger.info("Derived topic=%s, subtype=%s from legacy intent=%s", topic, subtype, intent)
+        return topic, subtype
+
+    # Case 3: nothing — general fallback
+    return "general", "general"
+
+
 def build_plan(
     run_id: str,
     request: str,
@@ -252,14 +342,16 @@ def build_plan(
     Returns:
         A fully populated ResearchPlan.
     """
-    # Normalize intent
-    intent = analysis.get("intent", "general_research")
-    if intent not in VALID_INTENTS:
-        logger.warning("Unknown intent '%s', defaulting to general_research", intent)
-        intent = "general_research"
+    # Resolve topic/subtype (canonical internal model)
+    topic, subtype = _resolve_topic_subtype(analysis)
+    framework_id = f"{topic}.{subtype}"
 
-    # Determine deliverables from intent
-    deliverables = INTENT_DELIVERABLES.get(intent, ["evidence_memo"])
+    # Derive intent for backward compatibility
+    intent = _TOPIC_TO_INTENT.get(topic, "general_research")
+
+    # Determine deliverables from framework
+    fw = get_framework(topic, subtype)
+    deliverables = fw.deliverables if fw.deliverables else ["evidence_memo"]
 
     # Normalize search_queries (typed → flat)
     flat_queries, typed_queries = _normalize_queries(
@@ -285,6 +377,9 @@ def build_plan(
         recalled_evidence_ids=recalled.get("recalled_evidence_ids", []),
         recalled_claim_ids=recalled.get("recalled_claim_ids", []),
         constraints=constraints,
+        topic=topic,
+        subtype=subtype,
+        framework_id=framework_id,
     )
 
 
@@ -317,7 +412,11 @@ def run(
     plan = build_plan(run_id, request, analysis, recalled)
 
     logger.info(
-        "Plan generated: intent=%s, targets=%s, queries=%d, deliverables=%s",
+        "Plan generated: topic=%s, subtype=%s, framework=%s, intent=%s, "
+        "targets=%s, queries=%d, deliverables=%s",
+        plan.topic,
+        plan.subtype,
+        plan.framework_id,
         plan.intent,
         plan.targets,
         len(plan.search_queries),

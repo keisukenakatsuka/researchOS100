@@ -148,9 +148,9 @@ def _collect_voice_input(
     if record_wizard:
         section_defs = [
             {"key": "wins_3", "title_ja": "Wins 3 (今週の3大成果)", "title_en": "Top 3 wins this week"},
-            {"key": "improvements_3", "title_ja": "Improvements 3 (改善点)", "title_en": "Top 3 improvements"},
+            {"key": "improvements_3", "title_ja": "今週うまくいかなかったこと3つ", "title_en": "Top 3 things that didn't go well this week"},
             {"key": "value_alignment", "title_ja": "価値アラインメント", "title_en": "Value alignment check"},
-            {"key": "adjustment", "title_ja": "調整提案", "title_en": "Adjustment proposal for next week"},
+            {"key": "adjustment", "title_ja": "来週チャレンジしたいこと3つ", "title_en": "Top 3 challenges for next week"},
         ]
         out_dir = tempfile.mkdtemp(prefix="063_wizard_")
         section_results = launch_wizard_recorder(
@@ -414,9 +414,9 @@ def _build_web_ui_config():
         log_label="063_weekly_review",
         sections=[
             SectionDef(key="wins_3", title_ja="Wins 3 (今週の3大成果)", title_en="Top 3 wins this week"),
-            SectionDef(key="improvements_3", title_ja="Improvements 3 (改善点)", title_en="Top 3 improvements"),
-            SectionDef(key="value_alignment", title_ja="価値アラインメント", title_en="Value alignment check"),
-            SectionDef(key="adjustment", title_ja="調整提案", title_en="Adjustment proposal for next week"),
+            SectionDef(key="improvements_3", title_ja="今週うまくいかなかったこと3つ", title_en="Top 3 things that didn't go well this week"),
+            SectionDef(key="value_alignment", title_ja="価値アラインメント", title_en="Value alignment check", input_type="value_domains"),
+            SectionDef(key="adjustment", title_ja="来週チャレンジしたいこと3つ", title_en="Top 3 challenges for next week"),
         ],
         field_mappings=[
             FieldMapping(section_key="wins_3", notion_property="Wins 3", llm_json_key="wins_3", property_kwarg="wins_3", is_primary=True),
@@ -429,7 +429,7 @@ def _build_web_ui_config():
         has_planning_context=True,
         planning_context_fields=["Big 3", "Success Criteria"],
         llm_system_role="You are a weekly review assistant.",
-        llm_json_schema='{"wins_3": "1. ... 2. ... 3. ...", "improvements_3": "1. ... 2. ... 3. ...", "value_alignment_score": 7, "adjustment_proposal": "..."}',
+        llm_json_schema='{"wins_3": "1. ... 2. ... 3. ...", "improvements_3": "今週うまくいかなかったこと 1. ... 2. ... 3. ...", "value_alignment_score": 7, "adjustment_proposal": "来週チャレンジしたいこと 1. ... 2. ... 3. ..."}',
         build_properties_fn=build_weekly_log_properties,
         upsert_fn=upsert_weekly_log,
         title_template="Weekly Review {period_name}",

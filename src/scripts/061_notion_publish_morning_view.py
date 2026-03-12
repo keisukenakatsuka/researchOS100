@@ -351,168 +351,166 @@ def _query_notion_meeting_briefs(date_iso: str) -> List[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 059 INTERACTIVE — card-based meeting brief workflow
+# RESEARCH QUESTIONS — 073-based question-driven research
 # ═══════════════════════════════════════════════════════════════════
 
-def _extract_059_candidates(date_iso: str) -> Dict[str, Any]:
-    """Extract meeting candidates from 058 data using 059's LLM extraction.
+_RESEARCH_QUESTIONS_SYSTEM = (
+    "You are a research assistant. Based on the user's daily reflection/close log, "
+    "generate research questions that would be useful for their upcoming meetings, "
+    "projects, or areas of interest mentioned in the log.\n"
+    "Return a JSON array of question strings. Each question should be specific enough "
+    "for a research pipeline to investigate (e.g. person names, company names, topics).\n"
+    "Generate 2-5 questions. Output ONLY the JSON array, no explanation."
+)
 
-    Loads CloseStructured for *date_iso*, calls 059._extract_meeting_targets,
-    and returns the raw meeting cluster list.
-    """
+
+def _generate_research_questions(date_iso: str) -> Dict[str, Any]:
+    """Generate research questions from 058 structured summary using LLM."""
     try:
         struct_path = CLOSE_STRUCTURED_DIR / date_iso / "close_structured.json"
         if not struct_path.exists():
-            logger.warning("059 candidates: no 058 output for %s", date_iso)
             return {"ok": False, "error": f"No 058 output for {date_iso}. Run 058 first."}
 
         structured = CloseStructured.from_dict(load_json(struct_path))
 
-        import importlib
-        mod_059 = importlib.import_module("src.scripts.059_next_day_preparation")
-        extraction = mod_059._extract_meeting_targets(structured, date_iso)
-        meetings = extraction.get("meetings", [])
+        # Build context from structured summary
+        parts = []
+        if structured.structured_summary:
+            parts.append(f"Summary: {structured.structured_summary}")
+        if structured.provisional_top3:
+            parts.append(f"Top 3: {', '.join(structured.provisional_top3)}")
+        if structured.friction_blockers:
+            parts.append(f"Friction: {', '.join(structured.friction_blockers)}")
+        if structured.open_questions:
+            parts.append(f"Open Questions: {', '.join(structured.open_questions)}")
+        if structured.research_candidates:
+            parts.append(f"Research Candidates: {', '.join(structured.research_candidates)}")
 
-        logger.info(
-            "059 candidates: %d meetings extracted for %s",
-            len(meetings), date_iso,
+        context = "\n".join(parts)
+        if not context.strip():
+            return {"ok": True, "questions": []}
+
+        from src.llm.router import build_router_from_env, TASK_REASONING
+        router = build_router_from_env()
+        result = router.call(
+            task_type=TASK_REASONING,
+            system=_RESEARCH_QUESTIONS_SYSTEM,
+            user=f"Date: {date_iso}\n\n{context}",
+            model_override="gpt-4o",
+            temperature_override=0.5,
         )
-        return {"ok": True, "meetings": meetings, "count": len(meetings)}
+
+        parsed = result.parsed
+        if isinstance(parsed, dict) and "questions" in parsed:
+            questions = parsed["questions"]
+        elif isinstance(parsed, list):
+            questions = parsed
+        else:
+            questions = []
+        questions = [str(q) for q in questions if q]
+        logger.info("Generated %d research questions for %s", len(questions), date_iso)
+        return {"ok": True, "questions": questions}
     except Exception as e:
-        logger.error("059 candidate extraction failed: %s", e)
+        logger.error("Research question generation failed: %s", e)
         return {"ok": False, "error": str(e)}
 
 
-def _synthesize_059_briefs(
-    date_iso: str,
-    meetings: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Research and synthesize briefs for kept meeting candidates.
+def _run_research_question(question: str, date_iso: str) -> Dict[str, Any]:
+    """Execute a single research question via 073 internal functions.
 
-    For each meeting dict, runs 059's full 3-layer research pipeline
-    followed by LLM synthesis.  Returns a list of brief dicts ready
-    for preview and Notion save.
+    Uses run_single_pipeline() from session.py to run the full 067-072
+    pipeline, then generates a final answer and saves the session.
     """
-    try:
-        import importlib
-        mod_059 = importlib.import_module("src.scripts.059_next_day_preparation")
-
-        # Look up Daily Log page ID for linking
-        daily_log = _query_notion_daily_log(date_iso)
-        daily_log_id = (
-            daily_log["page_id"]
-            if daily_log and daily_log.get("page_id")
-            else ""
-        )
-
-        logger.info(
-            "059 synthesize: processing %d kept meetings for %s "
-            "(daily_log_id=%s)",
-            len(meetings), date_iso, daily_log_id[:8] if daily_log_id else "(none)",
-        )
-
-        briefs: List[Dict[str, Any]] = []
-        for i, meeting in enumerate(meetings):
-            title = meeting.get("meeting_title", "(untitled)")
-            logger.info(
-                "059 synthesize: [%d/%d] researching + synthesizing '%s'",
-                i + 1, len(meetings), title,
-            )
-            # Deep Research first, fallback to 3-layer research
-            try:
-                brief = mod_059._generate_brief_deep_research(
-                    meeting, date_iso, daily_log_id=daily_log_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Deep Research failed for '%s', falling back to 3-layer",
-                    title, exc_info=True,
-                )
-                enriched = mod_059._research_meeting_cluster(meeting)
-                brief = mod_059._synthesize_meeting_brief(
-                    enriched, date_iso, daily_log_id=daily_log_id,
-                )
-            briefs.append(brief.to_dict())
-
-        logger.info(
-            "059 synthesis complete: %d briefs for %s",
-            len(briefs), date_iso,
-        )
-        return {"ok": True, "briefs": briefs}
-    except Exception as e:
-        logger.error("059 synthesis failed: %s", e)
-        return {"ok": False, "error": str(e)}
-
-
-def _save_059_briefs(
-    date_iso: str,
-    briefs: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Save multiple synthesized meeting briefs to Notion in batch."""
-    results: List[Dict[str, Any]] = []
-    for brief_data in briefs:
-        result = _save_brief_to_notion(brief_data)
-        title = brief_data.get("title", "")
-        results.append({
-            "title": title,
-            "ok": result.get("ok", False),
-            "page_id": result.get("page_id", ""),
-            "page_url": result.get("page_url", ""),
-            "action": result.get("action", ""),
-            "error": result.get("error", ""),
-        })
-        logger.info(
-            "059 save: '%s' -> ok=%s action=%s page_id=%s",
-            title,
-            result.get("ok"),
-            result.get("action"),
-            result.get("page_id", "")[:8],
-        )
-    ok_count = sum(1 for r in results if r["ok"])
-    logger.info(
-        "059 save batch: %d/%d succeeded for %s",
-        ok_count, len(results), date_iso,
+    from src.deep_research import generate_run_id
+    from src.deep_research.session import (
+        generate_session_id,
+        run_single_pipeline,
+        aggregate_results,
+        generate_final_answer,
+        save_session,
     )
-    return {"ok": True, "results": results}
+    from src.llm.claude_client import build_claude_client_from_env
+    from src.search.google_cse import build_google_cse_from_env
 
+    llm_client = build_claude_client_from_env()
+    search_client = build_google_cse_from_env()
 
-def _save_brief_to_notion(brief_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Write a meeting brief to Notion. Returns result dict."""
-    try:
-        from src.daily.models import MeetingBrief
-        brief = MeetingBrief(
-            title=brief_data["title"],
-            date=brief_data["date"],
-            people=brief_data.get("people", []),
-            purpose=brief_data.get("purpose", ""),
-            context=brief_data.get("context", ""),
-            key_questions=brief_data.get("key_questions", ""),
-            desired_outcomes=brief_data.get("desired_outcomes", ""),
-            prep_checklist=brief_data.get("prep_checklist", ""),
-            status=brief_data.get("status", "Draft"),
-            created_by=brief_data.get("created_by", "WebUI"),
-            daily_log_id=brief_data.get("daily_log_id", ""),
-        )
+    # Notion client (optional)
+    notion_client = None
+    enable_writeback = os.environ.get("ENABLE_NOTION_WRITEBACK", "").lower() == "true"
+    if enable_writeback:
+        try:
+            from src.notion.client import build_notion_client_from_env
+            notion_client = build_notion_client_from_env()
+        except Exception as e:
+            logger.warning("Notion client unavailable: %s", e)
 
-        # Look up Daily Log page ID for relation
-        daily_log = _query_notion_daily_log(brief_data["date"])
-        if daily_log and daily_log.get("page_id"):
-            brief.daily_log_id = daily_log["page_id"]
-            logger.info("Linked brief to Daily Log: %s", brief.daily_log_id[:8])
+    session_id = generate_session_id()
+    run_id = generate_run_id()
+    created_at = datetime.now(JST).isoformat()
 
-        # Import 059's Notion write function (module name starts with digit,
-        # so we need importlib).
-        import importlib
-        mod_059 = importlib.import_module("src.scripts.059_next_day_preparation")
-        result = mod_059._write_meeting_brief_to_notion(brief)
-        logger.info(
-            "Notion write result: ok=%s action=%s",
-            result.get("ok"), result.get("action"),
-        )
-        return result
-    except Exception as e:
-        logger.error("Failed to save brief to Notion: %s", e)
-        return {"ok": False, "error": str(e)}
+    logger.info(
+        "Research: executing question='%s' session=%s run=%s",
+        question[:60], session_id, run_id,
+    )
+
+    # Run pipeline
+    run_result = run_single_pipeline(
+        question=question,
+        run_id=run_id,
+        llm_client=llm_client,
+        search_client=search_client,
+        notion_client=notion_client,
+        enable_writeback=enable_writeback,
+    )
+
+    run_results = [run_result]
+    aggregated = aggregate_results(run_results)
+    intent = run_result.get("intent", "general_research")
+    framework_id = run_result.get("framework_id", "")
+
+    # Generate final answer
+    final_answer = generate_final_answer(
+        original_question=question,
+        aggregated=aggregated,
+        run_results=run_results,
+        llm_client=llm_client,
+        intent=intent,
+        framework_id=framework_id,
+    )
+
+    # Save session locally
+    status = "completed" if run_result["status"] == "completed" else "partial"
+    session_dir = save_session(
+        session_id=session_id,
+        user_question=question,
+        decomposed_questions=[question],
+        run_results=run_results,
+        final_answer=final_answer,
+        status=status,
+        created_at=created_at,
+    )
+
+    logger.info(
+        "Research complete: session=%s status=%s dir=%s",
+        session_id, status, session_dir,
+    )
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "run_id": run_id,
+        "status": status,
+        "question": question,
+        "memo_title": run_result.get("memo_title", ""),
+        "memo_summary": run_result.get("memo_summary", ""),
+        "answer_preview": final_answer[:200] if final_answer else "",
+        "answer_full": final_answer or "",
+        "sources_count": run_result.get("sources_count", 0),
+        "evidence_count": run_result.get("evidence_count", 0),
+        "claims_count": run_result.get("claims_count", 0),
+        "output_path": str(session_dir),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1240,80 +1238,52 @@ def _build_app():
             resp["result"] = job["result"]
         return resp
 
-    # ── 059 Card-based Meeting Brief workflow endpoints ──
+    # ── Research Questions — 073-based endpoints ──
 
-    @app.post("/api/059/candidates/{date_iso}")
-    async def extract_candidates(date_iso: str):
-        """Extract meeting candidates from 058 data."""
+    @app.post("/api/research/generate-questions/{date_iso}")
+    async def generate_questions(date_iso: str):
+        """Generate research questions from 058 data."""
         if not _DATE_RE.match(date_iso):
             return JSONResponse({"error": "Invalid date"}, status_code=400)
-        logger.info("059 candidates: extracting for %s", date_iso)
-        result = _extract_059_candidates(date_iso)
-        return result
+        logger.info("Research: generating questions for %s", date_iso)
+        return _generate_research_questions(date_iso)
 
-    @app.post("/api/059/synthesize/{date_iso}")
-    async def synthesize_briefs(date_iso: str, request_data: dict):
-        """Synthesize briefs for kept meetings (async via job/poll).
+    @app.post("/api/research/run")
+    async def run_research(request_data: dict):
+        """Run a single research question via 073 pipeline (background job)."""
+        question = request_data.get("question", "").strip()
+        date_iso = request_data.get("date_iso", "")
+        if not question:
+            return JSONResponse({"error": "No question provided"}, status_code=400)
 
-        Research + LLM synthesis can take 30-60+ seconds for multiple
-        meetings, so we run in a background thread and return a job_key
-        for the frontend to poll.
-        """
-        if not _DATE_RE.match(date_iso):
-            return JSONResponse({"error": "Invalid date"}, status_code=400)
-        meetings = request_data.get("meetings", [])
-        if not meetings:
-            return JSONResponse(
-                {"error": "No meetings provided"}, status_code=400,
-            )
-
-        job_key = f"059synth:{date_iso}"
+        job_key = f"research:{hash(question) % 100000}:{date_iso}"
         if job_key in _jobs and _jobs[job_key]["status"] == "running":
             return {"job_key": job_key, "status": "running"}
 
-        logger.info(
-            "059 synthesize: starting job for %d meetings, date=%s",
-            len(meetings), date_iso,
-        )
+        logger.info("Research: starting job for question='%s'", question[:60])
 
-        def _run_synth():
+        def _run():
             try:
-                result = _synthesize_059_briefs(date_iso, meetings)
+                result = _run_research_question(question, date_iso)
                 _jobs[job_key]["result"] = result
                 _jobs[job_key]["status"] = "done"
                 _jobs[job_key]["returncode"] = 0
                 _jobs[job_key]["output"] = (
-                    f"Synthesized {len(result.get('briefs', []))} briefs"
+                    f"Research complete: {result.get('memo_title', '')}"
                 )
             except Exception as exc:
                 _jobs[job_key]["output"] = str(exc)
                 _jobs[job_key]["status"] = "error"
                 _jobs[job_key]["returncode"] = -1
-                _jobs[job_key]["result"] = {
-                    "ok": False, "error": str(exc),
-                }
+                _jobs[job_key]["result"] = {"ok": False, "error": str(exc)}
 
         _jobs[job_key] = {
             "status": "running",
             "output": "",
             "returncode": None,
         }
-        threading.Thread(target=_run_synth, daemon=True).start()
+        threading.Thread(target=_run, daemon=True).start()
         return {"job_key": job_key, "status": "running"}
-
-    @app.post("/api/059/save/{date_iso}")
-    async def save_briefs(date_iso: str, request_data: dict):
-        """Save synthesized briefs to Notion."""
-        if not _DATE_RE.match(date_iso):
-            return JSONResponse({"error": "Invalid date"}, status_code=400)
-        briefs = request_data.get("briefs", [])
-        if not briefs:
-            return JSONResponse(
-                {"error": "No briefs provided"}, status_code=400,
-            )
-        logger.info("059 save: %d briefs for %s", len(briefs), date_iso)
-        result = _save_059_briefs(date_iso, briefs)
-        return result
 
     # -- 057 Browser-based close log submission --
 
@@ -1885,12 +1855,12 @@ function renderDateView(dt, data, notion) {
     + '<div id="section-060-container"></div>'
     + '<div id="section-057-container"></div>'
     + '<div id="section-058-container"></div>'
-    + '<div id="section-059-container"></div>';
+    + '<div id="section-research-container"></div>';
   renderNotionBar(notion);
   renderSection060(data, notion);
   renderSection057(data, notion);
   renderSection058(data);
-  renderSection059(data, notion);
+  renderSectionResearch(data);
 }
 
 function renderNotionBar(notion) {
@@ -2157,83 +2127,37 @@ function renderSection058(data) {
   }
 }
 
-function renderSection059(data, notion) {
-  var container = document.getElementById('section-059-container');
+function renderSectionResearch(data) {
+  var container = document.getElementById('section-research-container');
   if (!container) return;
-  var html = '<div class="section" id="section-059"><h3>059 Meeting Briefs';
-  var briefCount = 0;
-  if (data.next_day_prep) {
-    briefCount = data.next_day_prep.meeting_briefs.length;
-  }
-  if (notion && notion.meeting_briefs) {
-    briefCount = Math.max(briefCount, notion.meeting_briefs.length);
-  }
-  if (briefCount > 0) {
-    html += ' <span class="badge badge-green">' + briefCount + ' brief' + (briefCount !== 1 ? 's' : '') + '</span>';
-  }
-  html += '</h3>';
-
-  // Show existing Notion briefs as links
-  if (notion && notion.meeting_briefs && notion.meeting_briefs.length > 0) {
-    html += '<div style="margin-bottom:12px;font-size:12px;color:var(--text2)">';
-    html += 'Notion: ';
-    notion.meeting_briefs.forEach(function(nb, i) {
-      if (i > 0) html += ' | ';
-      html += '<a class="notion-link" href="' + nb.url + '" target="_blank">' + escHtml(nb.title || 'Brief') + '</a>';
-    });
-    html += '</div>';
-  }
-
-  // Card workflow container
-  html += '<div id="brief-workflow">';
-
-  // Step 1: Extract candidates
-  html += '<div id="brief-step-extract">';
+  var html = '<div class="section" id="section-research"><h3>Research Questions</h3>';
   html += '<p style="font-size:13px;color:var(--text2);margin-bottom:10px">';
-  html += '058\u306E\u30C7\u30FC\u30BF\u304B\u3089\u4F1A\u8B70\u5019\u88DC\u3092\u62BD\u51FA\u3057\u307E\u3059\u3002';
+  html += '\u632F\u308A\u8FD4\u308A\u304B\u3089\u8ABF\u67FB\u8CEA\u554F\u3092\u751F\u6210\u3057\u3001073 Deep Research \u3067\u5B9F\u884C\u3057\u307E\u3059\u3002';
   html += '</p>';
+
+  // Questions container
+  html += '<div id="research-questions"></div>';
+
+  // Add question button
+  html += '<button class="btn" id="btn-add-question" style="margin-top:8px;font-size:12px" onclick="addResearchQuestion()">';
+  html += '+ \u8CEA\u554F\u3092\u8FFD\u52A0</button>';
+
+  // Action buttons
+  html += '<div style="margin-top:14px;display:flex;gap:10px;align-items:center">';
   if (!data.close_structured) {
-    html += '<p style="font-size:12px;color:var(--red);margin-bottom:8px">058 output not found. Run 058 first.</p>';
+    html += '<button class="btn" disabled>058 \u304C\u5FC5\u8981\u3067\u3059</button>';
+  } else {
+    html += '<button class="btn" id="btn-generate-questions" onclick="generateResearchQuestions(currentDate)">\u8CEA\u554F\u3092\u751F\u6210</button>';
   }
-  html += '<button class="btn" id="btn-extract-candidates"' + (!data.close_structured ? ' disabled' : '') + '>';
-  html += 'Generate Candidates</button>';
-  html += '<div id="extract-status" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>';
+  html += '<button class="btn" id="btn-run-research" onclick="runAllResearch(currentDate)">\u8ABF\u67FB\u3092\u5B9F\u884C</button>';
+  html += '<div id="research-status" style="font-size:12px;color:var(--text2)"></div>';
   html += '</div>';
 
-  // Step 2-3: Cards container (populated dynamically by JS)
-  html += '<div id="brief-cards" style="display:none;margin-top:14px"></div>';
+  // Results container
+  html += '<div id="research-results" style="margin-top:14px"></div>';
 
-  // Step 4: Synthesize all
-  html += '<div id="brief-step-synth" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">';
-  html += '<button class="btn" id="btn-synthesize-all">Synthesize All Kept</button>';
-  html += '<div id="synth-status" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>';
-  html += '</div>';
-
-  // Previews (populated dynamically by JS after synthesis)
-  html += '<div id="brief-previews" style="display:none;margin-top:14px"></div>';
-
-  // Step 5: Save all
-  html += '<div id="brief-step-save" style="display:none;margin-top:14px;border-top:1px solid var(--border);padding-top:14px">';
-  html += '<button class="btn" id="btn-save-all">Save All to Notion</button>';
-  html += '<div id="save-status" style="margin-top:8px;font-size:12px;color:var(--text2)"></div>';
-  html += '</div>';
-
-  html += '</div>'; // end brief-workflow
-  html += '</div>'; // end section-059
+  html += '</div>'; // end section-research
   container.innerHTML = html;
-  // Attach handlers
-  var extractBtn = document.getElementById('btn-extract-candidates');
-  if (extractBtn) {
-    extractBtn.addEventListener('click', function() { extractCandidates(currentDate); });
-  }
-  var synthAllBtn = document.getElementById('btn-synthesize-all');
-  if (synthAllBtn) {
-    synthAllBtn.addEventListener('click', function() { synthesizeAllBriefs(currentDate); });
-  }
-  var saveAllBtn = document.getElementById('btn-save-all');
-  if (saveAllBtn) {
-    saveAllBtn.addEventListener('click', function() { saveAllBriefs(currentDate); });
-  }
 }
 
 async function refreshSection(section, date) {
@@ -2251,9 +2175,6 @@ async function refreshSection(section, date) {
     } else if (section === '058') {
       sectionData.close_structured = d.data;
       renderSection058(sectionData);
-    } else if (section === '059') {
-      sectionData.next_day_prep = d.data;
-      renderSection059(sectionData, _cachedNotion);
     } else if (section === '060') {
       sectionData.morning_commit = d.data;
       renderSection060(sectionData, _cachedNotion);
@@ -2322,416 +2243,215 @@ function pollJob(jobKey, num) {
   }, 2000);
 }
 
-// -- 059 Card-based Meeting Brief Workflow --
+// -- Research Questions Workflow --
 
-var _059state = {
-  status: 'idle',
-  candidates: [],
-  kept: {},
-  edits: {},
-  briefs: [],
-};
+var _researchQuestions = [];
+var _researchResults = {};
+var _researchJobKeys = {};
 
-async function extractCandidates(dt) {
-  var btn = document.getElementById('btn-extract-candidates');
-  var status = document.getElementById('extract-status');
-  if (btn) { btn.disabled = true; btn.textContent = 'Extracting...'; btn.className = 'btn running'; }
-  _059state.status = 'extracting';
-  status.textContent = 'Calling LLM to extract meeting candidates from 058...';
+function renderResearchQuestions() {
+  var container = document.getElementById('research-questions');
+  if (!container) return;
+  var html = '';
+  _researchQuestions.forEach(function(q, i) {
+    html += '<div style="display:flex;gap:8px;align-items:start;margin-bottom:8px">';
+    html += '<textarea id="rq-' + i + '" style="flex:1;min-height:36px;padding:8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;font-family:inherit;resize:vertical">' + escHtml(q) + '</textarea>';
+    html += '<button class="btn" style="font-size:11px;padding:4px 10px;color:var(--red);border-color:var(--red)" onclick="removeResearchQuestion(' + i + ')">&times;</button>';
+    html += '</div>';
+  });
+  container.innerHTML = html;
+}
+
+function addResearchQuestion() {
+  _researchQuestions.push('');
+  renderResearchQuestions();
+  var el = document.getElementById('rq-' + (_researchQuestions.length - 1));
+  if (el) el.focus();
+}
+
+function removeResearchQuestion(idx) {
+  _researchQuestions.splice(idx, 1);
+  renderResearchQuestions();
+}
+
+function syncResearchQuestions() {
+  _researchQuestions.forEach(function(q, i) {
+    var el = document.getElementById('rq-' + i);
+    if (el) _researchQuestions[i] = el.value.trim();
+  });
+}
+
+async function generateResearchQuestions(dt) {
+  var btn = document.getElementById('btn-generate-questions');
+  var status = document.getElementById('research-status');
+  if (btn) { btn.disabled = true; btn.textContent = '\u751F\u6210\u4E2D...'; }
+  status.textContent = '058 \u304B\u3089\u8CEA\u554F\u3092\u751F\u6210\u4E2D...';
   status.style.color = 'var(--text2)';
 
   try {
-    var resp = await fetch('/api/059/candidates/' + dt, {method: 'POST'});
+    var resp = await fetch('/api/research/generate-questions/' + dt, {method: 'POST'});
     var d = await resp.json();
-    if (d.ok && d.meetings) {
-      _059state.candidates = d.meetings;
-      _059state.status = 'candidates_ready';
-      _059state.kept = {};
-      _059state.edits = {};
-      _059state.briefs = [];
-      d.meetings.forEach(function(m, i) {
-        _059state.kept[i] = true;
-        var orgs = (m.organizations || []).map(function(o) { return {name: o.name || '', url: o.url || ''}; });
-        var ppl = (m.people || []).map(function(p) { return {name: p.name || '', url: p.url || ''}; });
-        if (ppl.length === 0) ppl.push({name: '', url: ''});
-        _059state.edits[i] = { organizations: orgs, people: ppl, context: m.purpose_hint || '' };
-      });
-      renderCandidateCards();
-      status.textContent = d.meetings.length + ' meeting candidate(s) extracted.';
+    if (d.ok && d.questions) {
+      _researchQuestions = d.questions;
+      renderResearchQuestions();
+      status.textContent = d.questions.length + ' \u8CEA\u554F\u3092\u751F\u6210\u3057\u307E\u3057\u305F\u3002\u7DE8\u96C6\u3057\u3066\u304B\u3089\u300C\u8ABF\u67FB\u3092\u5B9F\u884C\u300D\u3092\u62BC\u3057\u3066\u304F\u3060\u3055\u3044\u3002';
       status.style.color = 'var(--green)';
     } else {
-      status.textContent = 'Error: ' + (d.error || 'No meetings found');
+      status.textContent = 'Error: ' + (d.error || 'No questions generated');
       status.style.color = 'var(--red)';
-      _059state.status = 'idle';
     }
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
     status.style.color = 'var(--red)';
-    _059state.status = 'idle';
   }
-  if (btn) { btn.disabled = false; btn.textContent = 'Generate Candidates'; btn.className = 'btn'; }
+  if (btn) { btn.disabled = false; btn.textContent = '\u8CEA\u554F\u3092\u751F\u6210'; }
 }
 
-function _syncCardFieldsToState(idx) {
-  var ed = _059state.edits[idx];
-  if (!ed) return;
-  ed.organizations.forEach(function(o, oi) {
-    var nEl = document.getElementById('org-name-' + idx + '-' + oi);
-    var uEl = document.getElementById('org-url-' + idx + '-' + oi);
-    if (nEl) o.name = nEl.value.trim();
-    if (uEl) o.url = uEl.value.trim();
-  });
-  ed.people.forEach(function(p, pi) {
-    var nEl = document.getElementById('person-name-' + idx + '-' + pi);
-    var uEl = document.getElementById('person-url-' + idx + '-' + pi);
-    if (nEl) p.name = nEl.value.trim();
-    if (uEl) p.url = uEl.value.trim();
-  });
-  var ctxEl = document.getElementById('ctx-' + idx);
-  if (ctxEl) ed.context = ctxEl.value.trim();
-}
-
-function _renderCardFields(idx) {
-  var m = _059state.candidates[idx];
-  var ed = _059state.edits[idx];
-  var html = '';
-
-  // Organizations section
-  html += '<div class="field-group">';
-  html += '<div class="field-group-header">';
-  html += '<label>Organizations</label>';
-  html += '<button class="btn-add-row" data-action="add-org" data-idx="' + idx + '">+ Add Org</button>';
-  html += '</div>';
-  ed.organizations.forEach(function(org, oi) {
-    html += '<div class="row-entry three-col">';
-    html += '<div><label>Name</label><input type="text" id="org-name-' + idx + '-' + oi + '" value="' + escAttr(org.name) + '" placeholder="Organization name"></div>';
-    html += '<div><label>URL</label><input type="text" id="org-url-' + idx + '-' + oi + '" value="' + escAttr(org.url) + '" placeholder="https://..."></div>';
-    html += '<button class="btn-remove-row" data-action="rm-org" data-idx="' + idx + '" data-ri="' + oi + '" title="Remove">&times;</button>';
-    html += '</div>';
-  });
-  html += '</div>';
-
-  // People section (required)
-  html += '<div class="field-group">';
-  html += '<div class="field-group-header">';
-  html += '<label>People <span class="required-star">*</span></label>';
-  html += '<button class="btn-add-row" data-action="add-person" data-idx="' + idx + '">+ Add Person</button>';
-  html += '</div>';
-  ed.people.forEach(function(p, pi) {
-    var canRemove = ed.people.length > 1;
-    html += '<div class="row-entry three-col">';
-    html += '<div><label>Name <span class="required-star">*</span></label><input type="text" id="person-name-' + idx + '-' + pi + '" value="' + escAttr(p.name) + '" placeholder="Person name (required)"></div>';
-    html += '<div><label>URL <span class="required-star">*</span></label><input type="text" id="person-url-' + idx + '-' + pi + '" value="' + escAttr(p.url) + '" placeholder="https://... (required)"></div>';
-    html += '<button class="btn-remove-row" data-action="rm-person" data-idx="' + idx + '" data-ri="' + pi + '" title="Remove"' + (canRemove ? '' : ' disabled') + '>&times;</button>';
-    html += '</div>';
-  });
-  html += '<div class="validation-error" id="val-people-' + idx + '"></div>';
-  html += '</div>';
-
-  // Context (full width)
-  html += '<div class="full-width" style="margin-top:4px"><label>Meeting context</label>';
-  html += '<textarea id="ctx-' + idx + '" rows="2">' + escHtml(ed.context) + '</textarea></div>';
-
-  // Topics (read-only)
-  if (m.topics && m.topics.length > 0) {
-    html += '<div class="full-width" style="font-size:11px;color:var(--text2);margin-top:4px">';
-    html += 'Topics: ' + m.topics.map(function(t) { return escHtml(t.name); }).join(', ');
-    html += '</div>';
-  }
-  return html;
-}
-
-function _attachCardFieldHandlers(idx) {
-  var fieldsEl = document.getElementById('fields-' + idx);
-  if (!fieldsEl) return;
-  fieldsEl.querySelectorAll('[data-action]').forEach(function(btn) {
-    btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      var act = btn.getAttribute('data-action');
-      var ci = parseInt(btn.getAttribute('data-idx'), 10);
-      var ri = parseInt(btn.getAttribute('data-ri'), 10);
-      if (act === 'add-org') addOrgRow(ci);
-      else if (act === 'rm-org') removeOrgRow(ci, ri);
-      else if (act === 'add-person') addPersonRow(ci);
-      else if (act === 'rm-person') removePersonRow(ci, ri);
-    });
-  });
-}
-
-function renderCandidateCards() {
-  var container = document.getElementById('brief-cards');
-  var synthStep = document.getElementById('brief-step-synth');
-  container.style.display = 'block';
-  if (synthStep) synthStep.style.display = 'block';
-  // Hide preview/save from previous runs
-  var prevContainer = document.getElementById('brief-previews');
-  var saveStep = document.getElementById('brief-step-save');
-  if (prevContainer) prevContainer.style.display = 'none';
-  if (saveStep) saveStep.style.display = 'none';
-
-  var html = '';
-  _059state.candidates.forEach(function(m, idx) {
-    var kept = _059state.kept[idx];
-    html += '<div class="meeting-card' + (kept ? '' : ' removed') + '" id="card-' + idx + '">';
-
-    // Header: title + keep/remove
-    html += '<div class="card-header">';
-    html += '<span class="card-title">' + escHtml(m.meeting_title || 'Meeting ' + (idx+1)) + '</span>';
-    html += '<div class="card-toggle">';
-    html += '<button id="keep-' + idx + '" class="' + (kept ? 'active-keep' : '') + '">Keep</button>';
-    html += '<button id="remove-' + idx + '" class="' + (!kept ? 'active-remove' : '') + '">Remove</button>';
-    html += '</div></div>';
-
-    // Editable fields (rendered via helper)
-    html += '<div class="card-fields" id="fields-' + idx + '" style="' + (kept ? '' : 'display:none') + '">';
-    html += _renderCardFields(idx);
-    html += '</div>'; // card-fields
-    html += '</div>'; // meeting-card
-  });
-
-  container.innerHTML = html;
-
-  // Attach keep/remove + field handlers
-  _059state.candidates.forEach(function(m, idx) {
-    var keepBtn = document.getElementById('keep-' + idx);
-    var removeBtn = document.getElementById('remove-' + idx);
-    if (keepBtn) keepBtn.addEventListener('click', function() { toggleKeep(idx, true); });
-    if (removeBtn) removeBtn.addEventListener('click', function() { toggleKeep(idx, false); });
-    _attachCardFieldHandlers(idx);
-  });
-}
-
-function toggleKeep(idx, keep) {
-  _059state.kept[idx] = keep;
-  var card = document.getElementById('card-' + idx);
-  var fields = document.getElementById('fields-' + idx);
-  var keepBtn = document.getElementById('keep-' + idx);
-  var removeBtn = document.getElementById('remove-' + idx);
-  if (card) card.className = 'meeting-card' + (keep ? '' : ' removed');
-  if (fields) fields.style.display = keep ? '' : 'none';
-  if (keepBtn) keepBtn.className = keep ? 'active-keep' : '';
-  if (removeBtn) removeBtn.className = keep ? '' : 'active-remove';
-  // Clear validation when toggling
-  var valEl = document.getElementById('val-people-' + idx);
-  if (valEl) { valEl.textContent = ''; valEl.style.display = 'none'; }
-}
-
-function _refreshCardFields(idx) {
-  _syncCardFieldsToState(idx);
-  var fieldsEl = document.getElementById('fields-' + idx);
-  if (!fieldsEl) return;
-  fieldsEl.innerHTML = _renderCardFields(idx);
-  _attachCardFieldHandlers(idx);
-}
-
-function addOrgRow(idx) {
-  _syncCardFieldsToState(idx);
-  _059state.edits[idx].organizations.push({name: '', url: ''});
-  _refreshCardFields(idx);
-}
-
-function removeOrgRow(idx, ri) {
-  _syncCardFieldsToState(idx);
-  _059state.edits[idx].organizations.splice(ri, 1);
-  _refreshCardFields(idx);
-}
-
-function addPersonRow(idx) {
-  _syncCardFieldsToState(idx);
-  _059state.edits[idx].people.push({name: '', url: ''});
-  _refreshCardFields(idx);
-}
-
-function removePersonRow(idx, ri) {
-  var ed = _059state.edits[idx];
-  if (ed.people.length <= 1) return;
-  _syncCardFieldsToState(idx);
-  ed.people.splice(ri, 1);
-  _refreshCardFields(idx);
-}
-
-function collectEditedMeetings() {
-  var meetings = [];
-  _059state.candidates.forEach(function(m, idx) {
-    if (!_059state.kept[idx]) return;
-    _syncCardFieldsToState(idx);
-    var ed = _059state.edits[idx];
-    var meeting = JSON.parse(JSON.stringify(m));
-    meeting.organizations = ed.organizations.filter(function(o) { return o.name || o.url; });
-    meeting.people = ed.people.filter(function(p) { return p.name || p.url; });
-    meeting.purpose_hint = ed.context;
-    meetings.push(meeting);
-  });
-  return meetings;
-}
-
-function _validateKeptMeetings() {
-  var valid = true;
-  _059state.candidates.forEach(function(m, idx) {
-    var valEl = document.getElementById('val-people-' + idx);
-    if (!valEl) return;
-    valEl.textContent = '';
-    valEl.style.display = 'none';
-    if (!_059state.kept[idx]) return;
-    _syncCardFieldsToState(idx);
-    var ed = _059state.edits[idx];
-    var hasValidPerson = ed.people.some(function(p) { return p.name && p.url; });
-    if (!hasValidPerson) {
-      valEl.textContent = 'At least one Person with both Name and URL is required.';
-      valEl.style.display = 'block';
-      valid = false;
-    }
-  });
-  return valid;
-}
-
-async function synthesizeAllBriefs(dt) {
-  var btn = document.getElementById('btn-synthesize-all');
-  var status = document.getElementById('synth-status');
-
-  // Validate before collecting
-  if (!_validateKeptMeetings()) {
-    status.textContent = 'Fix validation errors above before synthesizing.';
+async function runAllResearch(dt) {
+  syncResearchQuestions();
+  var questions = _researchQuestions.filter(function(q) { return q.length > 0; });
+  if (questions.length === 0) {
+    var status = document.getElementById('research-status');
+    status.textContent = '\u8CEA\u554F\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002';
     status.style.color = 'var(--red)';
     return;
   }
 
-  var meetings = collectEditedMeetings();
+  var btn = document.getElementById('btn-run-research');
+  var statusEl = document.getElementById('research-status');
+  if (btn) { btn.disabled = true; btn.textContent = '\u5B9F\u884C\u4E2D...'; }
+  statusEl.textContent = questions.length + ' \u8CEA\u554F\u3092\u5B9F\u884C\u4E2D...';
+  statusEl.style.color = 'var(--text2)';
 
-  if (meetings.length === 0) {
-    status.textContent = 'No meetings kept. Keep at least one to synthesize.';
-    status.style.color = 'var(--red)';
-    return;
-  }
+  _researchResults = {};
+  _researchJobKeys = {};
+  renderResearchResults(questions);
 
-  if (btn) { btn.disabled = true; btn.textContent = 'Synthesizing...'; btn.className = 'btn running'; }
-  _059state.status = 'synthesizing';
-  status.textContent = 'Researching + synthesizing ' + meetings.length + ' meeting(s)... This may take a minute.';
-  status.style.color = 'var(--text2)';
-
-  try {
-    var resp = await fetch('/api/059/synthesize/' + dt, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({meetings: meetings}),
-    });
-    var d = await resp.json();
-    if (d.job_key) {
-      pollSynthJob(d.job_key, dt);
-    } else if (d.ok && d.briefs) {
-      onSynthComplete(d.briefs);
-    } else {
-      status.textContent = 'Error: ' + (d.error || 'Synthesis failed');
-      status.style.color = 'var(--red)';
-      _059state.status = 'candidates_ready';
-      if (btn) { btn.disabled = false; btn.textContent = 'Synthesize All Kept'; btn.className = 'btn'; }
+  for (var i = 0; i < questions.length; i++) {
+    var q = questions[i];
+    try {
+      var resp = await fetch('/api/research/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({question: q, date_iso: dt}),
+      });
+      var d = await resp.json();
+      if (d.job_key) {
+        _researchJobKeys[i] = d.job_key;
+        pollResearchJob(i, d.job_key, questions);
+      }
+    } catch(e) {
+      _researchResults[i] = {ok: false, error: e.message, question: q};
+      renderResearchResults(questions);
     }
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    status.style.color = 'var(--red)';
-    _059state.status = 'candidates_ready';
-    if (btn) { btn.disabled = false; btn.textContent = 'Synthesize All Kept'; btn.className = 'btn'; }
   }
 }
 
-function pollSynthJob(jobKey, dt) {
-  var status = document.getElementById('synth-status');
-  var btn = document.getElementById('btn-synthesize-all');
+function pollResearchJob(idx, jobKey, questions) {
   var interval = setInterval(async function() {
     try {
       var resp = await fetch('/api/job/' + encodeURIComponent(jobKey));
       var d = await resp.json();
-      if (d.output) status.textContent = d.output;
       if (d.status !== 'running') {
         clearInterval(interval);
-        if (d.status === 'done' && d.result && d.result.ok && d.result.briefs) {
-          onSynthComplete(d.result.briefs);
+        if (d.status === 'done' && d.result) {
+          _researchResults[idx] = d.result;
         } else {
-          var errMsg = (d.result && d.result.error) ? d.result.error : (d.output || 'Unknown error');
-          status.textContent = 'Synthesis failed: ' + errMsg;
-          status.style.color = 'var(--red)';
-          _059state.status = 'candidates_ready';
-          if (btn) { btn.disabled = false; btn.textContent = 'Synthesize All Kept'; btn.className = 'btn'; }
+          _researchResults[idx] = {ok: false, error: d.output || 'Failed', question: questions[idx]};
+        }
+        renderResearchResults(questions);
+        checkAllResearchDone(questions);
+      }
+    } catch(e) { /* ignore */ }
+  }, 3000);
+}
+
+function checkAllResearchDone(questions) {
+  var done = true;
+  for (var i = 0; i < questions.length; i++) {
+    if (!_researchResults[i]) { done = false; break; }
+  }
+  if (done) {
+    var btn = document.getElementById('btn-run-research');
+    var statusEl = document.getElementById('research-status');
+    var okCount = 0;
+    for (var j = 0; j < questions.length; j++) {
+      if (_researchResults[j] && _researchResults[j].ok) okCount++;
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '\u8ABF\u67FB\u3092\u5B9F\u884C'; }
+    statusEl.textContent = okCount + '/' + questions.length + ' \u5B8C\u4E86';
+    statusEl.style.color = okCount === questions.length ? 'var(--green)' : 'var(--orange)';
+  }
+}
+
+function simpleMarkdown(text) {
+  var s = escHtml(text);
+  s = s.replace(/^### (.+)$/gm, '<h4 style="margin:10px 0 4px;font-size:13px">$1</h4>');
+  s = s.replace(/^## (.+)$/gm, '<h3 style="margin:14px 0 6px;font-size:14px">$1</h3>');
+  s = s.replace(/^# (.+)$/gm, '<h2 style="margin:16px 0 8px;font-size:16px">$1</h2>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/^- (.+)$/gm, '<li style="margin-left:16px;list-style:disc">$1</li>');
+  s = s.replace(/^\d+\. (.+)$/gm, '<li style="margin-left:16px;list-style:decimal">$1</li>');
+  s = s.replace(/\n/g, '<br>');
+  return s;
+}
+
+function toggleAnswer(idx) {
+  var preview = document.getElementById('answer-preview-' + idx);
+  var full = document.getElementById('answer-full-' + idx);
+  if (preview.style.display !== 'none') {
+    preview.style.display = 'none';
+    full.style.display = 'block';
+  } else {
+    preview.style.display = 'block';
+    full.style.display = 'none';
+  }
+}
+
+function renderResearchResults(questions) {
+  var container = document.getElementById('research-results');
+  if (!container) return;
+  var html = '';
+  questions.forEach(function(q, i) {
+    var r = _researchResults[i];
+    html += '<div style="background:var(--surface2);border-radius:8px;padding:12px;margin-bottom:8px">';
+    if (!r) {
+      html += '<div style="display:flex;align-items:center;gap:8px">';
+      html += '<span style="color:var(--orange)">\u23F3</span>';
+      html += '<span style="font-size:13px">' + escHtml(q) + '</span>';
+      html += '<span style="font-size:11px;color:var(--text2)">\u5B9F\u884C\u4E2D...</span>';
+      html += '</div>';
+    } else if (r.ok) {
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+      html += '<span style="color:var(--green)">\u2713</span>';
+      html += '<span style="font-size:13px;font-weight:600">' + escHtml(q) + '</span>';
+      html += '</div>';
+      if (r.memo_title) html += '<div style="font-size:12px;color:var(--text2)">Memo: ' + escHtml(r.memo_title) + '</div>';
+      // Answer: preview + show more toggle
+      if (r.answer_full) {
+        var hasMore = r.answer_full.length > 200;
+        html += '<div id="answer-preview-' + i + '" style="margin-top:6px">';
+        html += '<pre style="white-space:pre-wrap;font-size:12px;color:var(--text);margin:0;font-family:inherit;line-height:1.6">' + escHtml(r.answer_preview || r.answer_full.substring(0, 200)) + (hasMore ? '...' : '') + '</pre>';
+        if (hasMore) html += '<button class="btn" style="font-size:11px;padding:2px 10px;margin-top:4px" onclick="toggleAnswer(' + i + ')">Show more</button>';
+        html += '</div>';
+        if (hasMore) {
+          html += '<div id="answer-full-' + i + '" style="display:none;margin-top:6px">';
+          html += '<div style="max-height:600px;overflow-y:auto;font-size:12px;line-height:1.7;color:var(--text)">' + simpleMarkdown(r.answer_full) + '</div>';
+          html += '<button class="btn" style="font-size:11px;padding:2px 10px;margin-top:6px" onclick="toggleAnswer(' + i + ')">\u6298\u308A\u305F\u305F\u3080</button>';
+          html += '</div>';
         }
       }
-    } catch(e) { /* ignore poll errors */ }
-  }, 2000);
-}
-
-function onSynthComplete(briefs) {
-  var status = document.getElementById('synth-status');
-  var btn = document.getElementById('btn-synthesize-all');
-  _059state.briefs = briefs;
-  _059state.status = 'synthesized';
-  renderBriefPreviews(briefs);
-  document.getElementById('brief-step-save').style.display = 'block';
-  status.textContent = briefs.length + ' brief(s) synthesized. Review below, then save.';
-  status.style.color = 'var(--green)';
-  if (btn) { btn.disabled = false; btn.textContent = 'Synthesize All Kept'; btn.className = 'btn'; }
-}
-
-function renderBriefPreviews(briefs) {
-  var container = document.getElementById('brief-previews');
-  container.style.display = 'block';
-  var html = '<h4 style="margin-bottom:10px">\u30D7\u30EC\u30D3\u30E5\u30FC</h4>';
-  briefs.forEach(function(b) {
-    html += '<div style="background:var(--surface2);border-radius:8px;padding:14px;margin-bottom:10px">';
-    html += '<div style="font-weight:600;margin-bottom:6px">' + escHtml(b.title) + '</div>';
-    if (b.people && b.people.length > 0) {
-      html += '<div style="font-size:12px;color:var(--text2);margin-bottom:4px">People: ' + escHtml(b.people.join(', ')) + '</div>';
+      html += '<div style="font-size:11px;color:var(--text2);margin-top:4px">Sources: ' + (r.sources_count||0) + ' | Evidence: ' + (r.evidence_count||0) + ' | Claims: ' + (r.claims_count||0) + '</div>';
+    } else {
+      html += '<div style="display:flex;align-items:center;gap:8px">';
+      html += '<span style="color:var(--red)">\u2717</span>';
+      html += '<span style="font-size:13px">' + escHtml(q) + '</span>';
+      html += '</div>';
+      html += '<div style="font-size:12px;color:var(--red)">' + escHtml(r.error || 'Unknown error') + '</div>';
     }
-    if (b.purpose) html += '<div style="font-size:13px;margin-bottom:4px"><strong>Purpose:</strong> ' + escHtml(b.purpose) + '</div>';
-    if (b.context) html += '<div style="font-size:13px;margin-bottom:4px"><strong>Context:</strong> ' + escHtml(b.context) + '</div>';
-    if (b.key_questions) html += '<div style="font-size:13px;margin-bottom:4px"><strong>Key Questions:</strong><br>' + escHtml(b.key_questions) + '</div>';
-    if (b.desired_outcomes) html += '<div style="font-size:13px;margin-bottom:4px"><strong>Desired Outcomes:</strong><br>' + escHtml(b.desired_outcomes) + '</div>';
-    if (b.prep_checklist) html += '<div style="font-size:13px"><strong>Prep Checklist:</strong><br>' + escHtml(b.prep_checklist) + '</div>';
     html += '</div>';
   });
   container.innerHTML = html;
-}
-
-async function saveAllBriefs(dt) {
-  var btn = document.getElementById('btn-save-all');
-  var status = document.getElementById('save-status');
-  if (!_059state.briefs || _059state.briefs.length === 0) {
-    status.textContent = 'No briefs to save.';
-    status.style.color = 'var(--red)';
-    return;
-  }
-
-  if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; btn.className = 'btn running'; }
-  _059state.status = 'saving';
-  status.textContent = 'Saving ' + _059state.briefs.length + ' brief(s) to Notion...';
-  status.style.color = 'var(--text2)';
-
-  try {
-    var resp = await fetch('/api/059/save/' + dt, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({briefs: _059state.briefs}),
-    });
-    var d = await resp.json();
-    if (d.ok && d.results) {
-      _059state.status = 'saved';
-      var successCount = d.results.filter(function(r) { return r.ok; }).length;
-      var lines = d.results.map(function(r) {
-        if (r.ok) return escHtml(r.title) + ': ' + r.action + ' (' + (r.page_id || '').substring(0,8) + ')';
-        return escHtml(r.title) + ': FAILED - ' + (r.error || 'unknown');
-      });
-      status.innerHTML = 'Saved ' + successCount + '/' + d.results.length + ' to Notion.<br>' + lines.join('<br>');
-      status.style.color = successCount === d.results.length ? 'var(--green)' : 'var(--orange, #f59e0b)';
-      setTimeout(function() { loadDateView(currentDate); }, 1500);
-    } else {
-      status.textContent = 'Error: ' + (d.error || 'Save failed');
-      status.style.color = 'var(--red)';
-      _059state.status = 'synthesized';
-    }
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    status.style.color = 'var(--red)';
-    _059state.status = 'synthesized';
-  }
-  if (btn) { btn.disabled = false; btn.textContent = 'Save All to Notion'; btn.className = 'btn'; }
 }
 
 // -- 057 Wizard: Audio Recording per Section --

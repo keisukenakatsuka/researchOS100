@@ -389,7 +389,7 @@ def _build_web_ui_config():
             SectionDef(key="big_3", title_ja="Big 3 (今週の3大目標)", title_en="Big 3 goals for this week"),
             SectionDef(key="success_criteria", title_ja="成功基準", title_en="Success criteria"),
             SectionDef(key="execution_plan", title_ja="実行計画", title_en="Execution plan (day-by-day)"),
-            SectionDef(key="values", title_ja="価値リンク", title_en="Value links"),
+            SectionDef(key="values", title_ja="価値リンク", title_en="Value links", input_type="value_domains"),
         ],
         field_mappings=[
             FieldMapping(section_key="big_3", notion_property="Big 3", llm_json_key="big_3", property_kwarg="big_3", is_primary=True),

@@ -152,9 +152,9 @@ def _collect_voice_input(
     if record_wizard:
         section_defs = [
             {"key": "success_3", "title_ja": "Success 3 (今月の3大成果)", "title_en": "Top 3 successes this month"},
-            {"key": "improvements_3", "title_ja": "Improvements 3 (改善点)", "title_en": "Top 3 improvements"},
-            {"key": "value_adjustment", "title_ja": "価値調整", "title_en": "Value adjustment needed?"},
-            {"key": "structural_lessons", "title_ja": "構造的教訓", "title_en": "Structural lessons learned"},
+            {"key": "improvements_3", "title_ja": "今月うまくいかなかったこと3つ", "title_en": "Top 3 things that didn't go well this month"},
+            {"key": "value_adjustment", "title_ja": "来月チャレンジしたいこと3つ", "title_en": "Top 3 challenges for next month"},
+            {"key": "structural_lessons", "title_ja": "自分の行動・意思決定のパターンからの学び3つ", "title_en": "Top 3 learnings from behavioral/decision patterns"},
         ]
         out_dir = tempfile.mkdtemp(prefix="065_wizard_")
         section_results = launch_wizard_recorder(
@@ -477,9 +477,9 @@ def _build_web_ui_config():
         log_label="065_monthly_review",
         sections=[
             SectionDef(key="success_3", title_ja="Success 3 (今月の3大成果)", title_en="Top 3 successes this month"),
-            SectionDef(key="improvements_3", title_ja="Improvements 3 (改善点)", title_en="Top 3 improvements"),
-            SectionDef(key="value_adjustment", title_ja="価値調整", title_en="Value adjustment needed?"),
-            SectionDef(key="structural_lessons", title_ja="構造的教訓", title_en="Structural lessons learned"),
+            SectionDef(key="improvements_3", title_ja="今月うまくいかなかったこと3つ", title_en="Top 3 things that didn't go well this month"),
+            SectionDef(key="value_adjustment", title_ja="来月チャレンジしたいこと3つ", title_en="Top 3 challenges for next month"),
+            SectionDef(key="structural_lessons", title_ja="自分の行動・意思決定のパターンからの学び3つ", title_en="Top 3 learnings from behavioral/decision patterns"),
         ],
         field_mappings=[
             FieldMapping(section_key="success_3", notion_property="Success 3", llm_json_key="success_3", property_kwarg="success_3", is_primary=True),
@@ -493,7 +493,7 @@ def _build_web_ui_config():
         has_planning_context=True,
         planning_context_fields=["Big 3", "Strategic Rationale"],
         llm_system_role="You are a monthly review assistant.",
-        llm_json_schema='{"success_3": "1. ... 2. ... 3. ...", "improvements_3": "1. ... 2. ... 3. ...", "value_adjustment_needed": true, "value_adjustment_proposal": "...", "structural_lessons": "..."}',
+        llm_json_schema='{"success_3": "1. ... 2. ... 3. ...", "improvements_3": "今月うまくいかなかったこと 1. ... 2. ... 3. ...", "value_adjustment_needed": true, "value_adjustment_proposal": "来月チャレンジしたいこと 1. ... 2. ... 3. ...", "structural_lessons": "行動・意思決定パターンからの学び 1. ... 2. ... 3. ..."}',
         build_properties_fn=build_monthly_log_properties,
         upsert_fn=upsert_monthly_log,
         pre_upsert_hooks=[_monthly_review_pre_hook],

@@ -74,12 +74,18 @@ def normalize_target(page: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not name:
         return None
 
-    # Parse error_count safely
+    # Parse numeric fields safely
     error_count_raw = ev(page, "Error Count")
     try:
         error_count = int(error_count_raw) if error_count_raw is not None else 0
     except (ValueError, TypeError):
         error_count = 0
+
+    consecutive_misses_raw = ev(page, "Consecutive Misses")
+    try:
+        consecutive_misses = int(consecutive_misses_raw) if consecutive_misses_raw is not None else 0
+    except (ValueError, TypeError):
+        consecutive_misses = 0
 
     return {
         "page_id": page_id,
@@ -96,6 +102,11 @@ def normalize_target(page: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "next_check": _to_date_str(ev(page, "Next Check")),
         "last_error": ev(page, "Last Error") or "",
         "error_count": error_count,
+        "last_hit_at": _to_date_str(ev(page, "Last Hit At")),
+        "consecutive_misses": consecutive_misses,
+        "cadence_reason": ev(page, "Cadence Reason") or "",
+        "created_by": ev(page, "Created By") or "",
+        "source_session": ev(page, "Source Session") or "",
     }
 
 

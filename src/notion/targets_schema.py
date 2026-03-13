@@ -51,6 +51,11 @@ TARGETS_OPERATIONAL_PROPERTIES: Dict[str, str] = {
     "Next Check": "date",
     "Last Error": "rich_text",
     "Error Count": "number",
+    "Last Hit At": "date",
+    "Consecutive Misses": "number",
+    "Cadence Reason": "rich_text",
+    "Created By": "select",       # manual / 076_session / 050_review
+    "Source Session": "rich_text",
 }
 
 # Union of all groups.
@@ -87,6 +92,11 @@ VOLUME_CAP: int = 10
 
 PRIORITY_ORDER = ["Low", "Medium", "High", "Critical"]
 CADENCE_OPTIONS = ["Daily", "Weekly", "Bi-weekly", "Monthly"]
+
+# 075 cadence transition thresholds (execution-count based)
+WEEKLY_TO_MONTHLY_MISSES: int = 3
+MONTHLY_TO_PAUSED_MISSES: int = 3
+MONTHLY_CHECK_INTERVAL_DAYS: int = 30
 
 REMOVAL_EFFECTIVENESS_THRESHOLD: float = 0.25
 DOWNGRADE_EFFECTIVENESS_THRESHOLD: float = 0.40

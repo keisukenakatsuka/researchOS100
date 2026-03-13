@@ -3,6 +3,9 @@
 
 MVP implementation uses keyword-based search against Notion DBs.
 Called by the planner before generating a new research plan.
+
+Also provides recall_events_context() for 077 Events Context Bridge:
+loads cached events and returns those matching request keywords.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("067_recall")
@@ -205,3 +209,71 @@ def _build_recall_repos(notion_client: Any):
         logger.warning("[Recall] could not build ClaimsRepo: %s", e)
 
     return evidence_repo, claims_repo
+
+
+# -- events context recall ---------------------------------------------------
+
+# Project root for resolving context cache path
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_CONTEXT_DIR = _PROJECT_ROOT / "data" / "cache" / "events_context"
+
+# Noise suppression thresholds (design §2.5.5)
+_MIN_KEYWORD_OVERLAP = 2
+_MAX_EVENTS = 10
+
+
+def recall_events_context(
+    request: str,
+    *,
+    context_dir: Path = _DEFAULT_CONTEXT_DIR,
+    max_events: int = _MAX_EVENTS,
+    min_overlap: int = _MIN_KEYWORD_OVERLAP,
+) -> List[Dict[str, Any]]:
+    """Search recent events context for events related to the request.
+
+    Loads the latest context cache (produced by 077) and returns events
+    whose keywords overlap with the request keywords.
+
+    Returns an empty list if:
+    - No cache file exists (077 hasn't run yet)
+    - No keywords extracted from request
+    - No events match the overlap threshold
+
+    This function is safe to call when no events context is available —
+    it does not modify any existing behavior.
+    """
+    from src.daily.events_context import load_latest_context
+
+    context = load_latest_context(context_dir=context_dir)
+    if context is None:
+        logger.debug("[EventsRecall] No context cache found in %s", context_dir)
+        return []
+
+    events = context.get("events", [])
+    if not events:
+        logger.debug("[EventsRecall] Context cache is empty")
+        return []
+
+    # Extract keywords from request
+    request_kws = set(kw.lower() for kw in extract_keywords(request))
+    if not request_kws:
+        logger.debug("[EventsRecall] No keywords extracted from request")
+        return []
+
+    # Score each event by keyword overlap
+    scored: List[tuple[int, Dict[str, Any]]] = []
+    for event in events:
+        event_kws = set(kw.lower() for kw in event.get("keywords", []))
+        overlap = len(request_kws & event_kws)
+        if overlap >= min_overlap:
+            scored.append((overlap, event))
+
+    # Sort by overlap descending, take top N
+    scored.sort(key=lambda x: -x[0])
+    result = [e for _, e in scored[:max_events]]
+
+    logger.info(
+        "[EventsRecall] %d events matched (from %d total, overlap >= %d)",
+        len(result), len(events), min_overlap,
+    )
+    return result

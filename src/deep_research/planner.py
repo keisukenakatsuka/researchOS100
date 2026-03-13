@@ -267,20 +267,30 @@ def recall_knowledge(
     """Search existing Knowledge Memory Layer for related entities.
 
     Delegates to src.deep_research.recall for the actual search.
+    Also calls recall_events_context() to find related recent events.
 
     Args:
         request: The original research request text.
         notion_client: Optional NotionClient for Notion queries.
 
     Returns:
-        Dict with recalled_evidence_ids and recalled_claim_ids.
+        Dict with recalled_evidence_ids, recalled_claim_ids,
+        and events_context (list of matching events, may be empty).
     """
     from src.deep_research.recall import recall_knowledge as _recall
+    from src.deep_research.recall import recall_events_context
 
     result = _recall(request, notion_client=notion_client)
+
+    # Events context (safe: returns [] if no cache exists)
+    events = recall_events_context(request)
+    if events:
+        logger.info("[Recall] %d related events found from context cache", len(events))
+
     return {
         "recalled_evidence_ids": result.get("evidence_ids", []),
         "recalled_claim_ids": result.get("claim_ids", []),
+        "events_context": events,
     }
 
 
@@ -365,13 +375,33 @@ def build_plan(
     # Normalize constraints
     constraints = _normalize_constraints(analysis.get("constraints", {}))
 
+    # Enrich with events context (if available)
+    key_questions = list(analysis.get("key_questions", []))
+    events_context = recalled.get("events_context", [])
+    if events_context:
+        # Add event-informed questions (max 2) as supplementary context
+        event_summaries = []
+        for ev in events_context[:3]:
+            ev_name = ev.get("name", "")
+            ev_date = ev.get("date", "")
+            if ev_name:
+                event_summaries.append(f"{ev_name} ({ev_date})")
+        if event_summaries:
+            events_note = (
+                "Recent related events: "
+                + "; ".join(event_summaries)
+                + ". Consider how these events relate to the research topic."
+            )
+            key_questions.append(events_note)
+            logger.info("[Plan] Injected %d events as context", len(event_summaries))
+
     return ResearchPlan(
         run_id=run_id,
         request=request,
         intent=intent,
         created_at=datetime.now(),
         targets=analysis.get("targets", []),
-        key_questions=analysis.get("key_questions", []),
+        key_questions=key_questions,
         search_queries=flat_queries,
         deliverables=deliverables,
         recalled_evidence_ids=recalled.get("recalled_evidence_ids", []),

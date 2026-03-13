@@ -100,13 +100,20 @@ def _is_port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+# ── Child process tracking ───────────────────────────────────────
+
+_LOG_DIR = Path("logs")
+_child_procs: Dict[str, subprocess.Popen] = {}
+_child_log_files: Dict[str, Path] = {}
+
+
 # ── FastAPI App ───────────────────────────────────────────────────
 
 
 def _build_app():
     """Create the FastAPI landing page application."""
     from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
     app = FastAPI(title="066 Plan & Review LP")
 
@@ -119,10 +126,17 @@ def _build_app():
         """Check which sub-servers are running."""
         status = {}
         for key, opt in MENU_OPTIONS.items():
+            running = _is_port_in_use(opt["port"])
+            crashed = False
+            if key in _child_procs:
+                rc = _child_procs[key].poll()
+                if rc is not None and not running:
+                    crashed = True
             status[key] = {
                 "label": opt["label"],
                 "port": opt["port"],
-                "running": _is_port_in_use(opt["port"]),
+                "running": running,
+                "crashed": crashed,
             }
         return {"ok": True, "status": status}
 
@@ -141,14 +155,30 @@ def _build_app():
         cmd = [sys.executable, "-m", opt["module"], "--no-browser"]
         logger.info("Launching %s: %s", script_id, " ".join(cmd))
 
-        subprocess.Popen(
+        _LOG_DIR.mkdir(exist_ok=True)
+        log_path = _LOG_DIR / f"{script_id}_subprocess.log"
+        log_fh = open(log_path, "w")
+
+        proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        _child_procs[script_id] = proc
+        _child_log_files[script_id] = log_path
+        logger.info("Launched %s (pid=%d), log=%s", script_id, proc.pid, log_path)
 
         return {"ok": True, "status": "launched", "port": port}
+
+    @app.get("/api/logs/{script_id}")
+    async def get_logs(script_id: str):
+        """Return the last 3000 chars of a sub-script's log."""
+        log_path = _child_log_files.get(script_id)
+        if not log_path or not log_path.exists():
+            return JSONResponse({"ok": False, "error": "No log file"}, status_code=404)
+        text = log_path.read_text(errors="replace")
+        return PlainTextResponse(text[-3000:])
 
     return app
 
@@ -319,17 +349,31 @@ async function checkStatus() {{
       const dot = document.getElementById(`status-${{id}}`);
       const launchBtn = document.getElementById(`launch-btn-${{id}}`);
       if (dot) {{
-        dot.className = info.running ? 'card-status running' : 'card-status';
+        if (info.crashed) {{
+          dot.className = 'card-status';
+          dot.style.background = '#ef4444';
+        }} else {{
+          dot.className = info.running ? 'card-status running' : 'card-status';
+          dot.style.background = '';
+        }}
       }}
       if (launchBtn) {{
         if (info.running) {{
           launchBtn.textContent = 'Running';
           launchBtn.disabled = true;
           launchBtn.style.opacity = '0.5';
+        }} else if (info.crashed) {{
+          launchBtn.textContent = 'Crashed — View Log';
+          launchBtn.disabled = false;
+          launchBtn.style.opacity = '1';
+          launchBtn.style.color = '#ef4444';
+          launchBtn.onclick = function() {{ viewLog(id); }};
         }} else {{
           launchBtn.textContent = 'Launch Server';
           launchBtn.disabled = false;
           launchBtn.style.opacity = '1';
+          launchBtn.style.color = '';
+          launchBtn.onclick = function() {{ launchScript(id); }};
         }}
       }}
     }}
@@ -366,6 +410,16 @@ async function launchScript(id) {{
       btn.textContent = 'Launch Server';
       btn.disabled = false;
     }}, 2000);
+  }}
+}}
+
+async function viewLog(id) {{
+  try {{
+    const resp = await fetch(`/api/logs/${{id}}`);
+    const text = await resp.text();
+    alert(`[${{id}}] Subprocess Log:\\n\\n${{text.slice(-1500)}}`);
+  }} catch (e) {{
+    alert(`Failed to fetch log for ${{id}}`);
   }}
 }}
 

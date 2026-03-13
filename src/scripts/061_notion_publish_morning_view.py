@@ -86,6 +86,79 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ═══════════════════════════════════════════════════════════════════
+# NOTION SINGLETON — resolve data_source_ids once at startup
+# ═══════════════════════════════════════════════════════════════════
+
+_notion_client = None          # NotionClient (set by _init_notion)
+_resolved_daily_logs = None    # ResolvedDB   (set by _init_notion)
+_resolved_meeting_briefs = None  # ResolvedDB (set by _init_notion)
+_notion_init_errors: List[str] = []  # errors during init
+
+
+def _init_notion() -> None:
+    """Resolve Notion data_source_ids once at server startup.
+
+    Must be called after load_env().  Stores results in module globals
+    so that per-request query functions skip the expensive resolution.
+    """
+    global _notion_client, _resolved_daily_logs, _resolved_meeting_briefs
+
+    daily_logs_id = get_optional_db_id("NOTION_Daily_Logs_ID")
+    meeting_briefs_id = get_optional_db_id("NOTION_Meeting_Briefs_ID")
+
+    if not daily_logs_id and not meeting_briefs_id:
+        msg = "Notion init skipped: neither NOTION_Daily_Logs_ID nor NOTION_Meeting_Briefs_ID is set"
+        logger.info(msg)
+        _notion_init_errors.append(msg)
+        return
+
+    try:
+        from src.notion.client import (
+            build_notion_client_from_env,
+            NotionDataSourceResolver,
+        )
+        _notion_client = build_notion_client_from_env(
+            log_requests=False, log_responses=False,
+        )
+        resolver = NotionDataSourceResolver(client=_notion_client)
+    except Exception as e:
+        msg = f"Notion client creation failed: {e}"
+        logger.error(msg)
+        _notion_init_errors.append(msg)
+        return
+
+    # Resolve daily_logs
+    if daily_logs_id:
+        try:
+            _resolved_daily_logs = resolver.resolve_once(
+                name="daily_logs", database_id=daily_logs_id,
+            )
+            logger.info(
+                "Notion init: daily_logs resolved -> data_source_id=%s",
+                _resolved_daily_logs.data_source_id[:12],
+            )
+        except Exception as e:
+            msg = f"Notion init: daily_logs resolution failed (db_id={daily_logs_id[:8]}...): {e}"
+            logger.error(msg)
+            _notion_init_errors.append(msg)
+
+    # Resolve meeting_briefs
+    if meeting_briefs_id:
+        try:
+            _resolved_meeting_briefs = resolver.resolve_once(
+                name="meeting_briefs", database_id=meeting_briefs_id,
+            )
+            logger.info(
+                "Notion init: meeting_briefs resolved -> data_source_id=%s",
+                _resolved_meeting_briefs.data_source_id[:12],
+            )
+        except Exception as e:
+            msg = f"Notion init: meeting_briefs resolution failed (db_id={meeting_briefs_id[:8]}...): {e}"
+            logger.error(msg)
+            _notion_init_errors.append(msg)
+
+
+# ═══════════════════════════════════════════════════════════════════
 # DATA LOADING — local pipeline outputs
 # ═══════════════════════════════════════════════════════════════════
 
@@ -235,23 +308,17 @@ def _extract_rich_text(prop: Dict[str, Any]) -> str:
 def _query_notion_daily_log(date_iso: str) -> Optional[Dict[str, Any]]:
     """Query Notion for the Daily Log page for a given date."""
     try:
-        db_id = get_optional_db_id("NOTION_Daily_Logs_ID")
-        if not db_id:
-            logger.info("Notion Daily Log query skipped: NOTION_Daily_Logs_ID not set")
+        if not _notion_client or not _resolved_daily_logs:
+            logger.info("Notion Daily Log query skipped: not initialized")
             return None
 
-        logger.info("Querying Notion Daily Log: db=%s date=%s", db_id[:8], date_iso)
-
-        from src.notion.client import (
-            build_notion_client_from_env,
-            NotionDataSourceResolver,
+        logger.info(
+            "Querying Notion Daily Log: ds=%s date=%s",
+            _resolved_daily_logs.data_source_id[:8], date_iso,
         )
-        client = build_notion_client_from_env(log_requests=False, log_responses=False)
-        resolver = NotionDataSourceResolver(client=client)
-        resolved = resolver.resolve_once(name="daily_logs", database_id=db_id)
 
-        pages = client.query_data_source(
-            data_source_id=resolved.data_source_id,
+        pages = _notion_client.query_data_source(
+            data_source_id=_resolved_daily_logs.data_source_id,
             filter={"property": "LogDate", "date": {"equals": date_iso}},
             page_size=1,
             fetch_all=False,
@@ -308,23 +375,17 @@ def _query_notion_daily_log(date_iso: str) -> Optional[Dict[str, Any]]:
 def _query_notion_meeting_briefs(date_iso: str) -> List[Dict[str, Any]]:
     """Query Notion for Meeting Briefs linked to a given date."""
     try:
-        db_id = get_optional_db_id("NOTION_Meeting_Briefs_ID")
-        if not db_id:
-            logger.info("Notion Meeting Briefs query skipped: NOTION_Meeting_Briefs_ID not set")
+        if not _notion_client or not _resolved_meeting_briefs:
+            logger.info("Notion Meeting Briefs query skipped: not initialized")
             return []
 
-        logger.info("Querying Notion Meeting Briefs: db=%s date=%s", db_id[:8], date_iso)
-
-        from src.notion.client import (
-            build_notion_client_from_env,
-            NotionDataSourceResolver,
+        logger.info(
+            "Querying Notion Meeting Briefs: ds=%s date=%s",
+            _resolved_meeting_briefs.data_source_id[:8], date_iso,
         )
-        client = build_notion_client_from_env(log_requests=False, log_responses=False)
-        resolver = NotionDataSourceResolver(client=client)
-        resolved = resolver.resolve_once(name="meeting_briefs", database_id=db_id)
 
-        pages = client.query_data_source(
-            data_source_id=resolved.data_source_id,
+        pages = _notion_client.query_data_source(
+            data_source_id=_resolved_meeting_briefs.data_source_id,
             filter={"property": "Date", "date": {"equals": date_iso}},
             page_size=20,
             fetch_all=False,
@@ -951,17 +1012,9 @@ def _resolve_reflection_source(commit_date: str) -> Optional[str]:
 
     # 3. Query Notion for most recent Daily Log before commit_date
     try:
-        db_id = get_optional_db_id("NOTION_Daily_Logs_ID")
-        if db_id:
-            from src.notion.client import (
-                build_notion_client_from_env,
-                NotionDataSourceResolver,
-            )
-            client = build_notion_client_from_env(log_requests=False, log_responses=False)
-            resolver = NotionDataSourceResolver(client=client)
-            resolved = resolver.resolve_once(name="daily_logs", database_id=db_id)
-            pages = client.query_data_source(
-                data_source_id=resolved.data_source_id,
+        if _notion_client and _resolved_daily_logs:
+            pages = _notion_client.query_data_source(
+                data_source_id=_resolved_daily_logs.data_source_id,
                 filter={"property": "LogDate", "date": {"before": commit_date}},
                 sorts=[{"property": "LogDate", "direction": "descending"}],
                 page_size=1,
@@ -1026,17 +1079,9 @@ def _run_060_generate(commit_date: str) -> Dict[str, Any]:
         if notion_log and notion_log.get("structured_summary"):
             # Extract provisional top 3 from Notion's Provisional Top 3 field
             try:
-                db_id = get_optional_db_id("NOTION_Daily_Logs_ID")
-                if db_id:
-                    from src.notion.client import (
-                        build_notion_client_from_env,
-                        NotionDataSourceResolver,
-                    )
-                    client = build_notion_client_from_env(log_requests=False, log_responses=False)
-                    resolver = NotionDataSourceResolver(client=client)
-                    resolved = resolver.resolve_once(name="daily_logs", database_id=db_id)
-                    pages = client.query_data_source(
-                        data_source_id=resolved.data_source_id,
+                if _notion_client and _resolved_daily_logs:
+                    pages = _notion_client.query_data_source(
+                        data_source_id=_resolved_daily_logs.data_source_id,
                         filter={"property": "LogDate", "date": {"equals": source_date}},
                         page_size=1,
                         fetch_all=False,
@@ -1168,6 +1213,18 @@ def _build_app():
 
     app = FastAPI(title="061 Daily Operational Console")
 
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+
+    class _RequestLogger(BaseHTTPMiddleware):
+        async def dispatch(self, request: StarletteRequest, call_next):
+            if request.url.path.startswith("/api/"):
+                logger.info(">> %s %s", request.method, request.url.path)
+            response = await call_next(request)
+            return response
+
+    app.add_middleware(_RequestLogger)
+
     @app.get("/", response_class=HTMLResponse)
     async def index():
         return _build_html()
@@ -1194,10 +1251,13 @@ def _build_app():
         logger.info("Querying Notion for %s", date_iso)
         daily_log = _query_notion_daily_log(date_iso)
         meeting_briefs = _query_notion_meeting_briefs(date_iso)
-        return {
+        result: Dict[str, Any] = {
             "daily_log": daily_log,
             "meeting_briefs": meeting_briefs,
         }
+        if _notion_init_errors:
+            result["init_errors"] = _notion_init_errors
+        return result
 
     @app.post("/api/run/{script_num}/{date_iso}")
     async def run_script(script_num: str, date_iso: str):
@@ -1783,37 +1843,45 @@ let currentDate = null;
 let pollInterval = null;
 
 async function loadDates() {
-  const resp = await fetch('/api/dates');
-  const d = await resp.json();
-  const list = document.getElementById('date-list');
-  list.innerHTML = '';
-  var todayDate = null;
-  // Use sidebar (past 7 days) if available
-  var entries = d.sidebar || d.dates.map(function(dt) { return {date: dt, is_today: false, has_data: true}; });
-  entries.forEach(function(entry) {
-    var dt = typeof entry === 'string' ? entry : entry.date;
-    var isToday = entry.is_today || false;
-    var hasData = entry.has_data !== false;
-    var el = document.createElement('div');
-    el.className = 'date-item';
-    if (isToday) {
-      todayDate = dt;
-      el.innerHTML = '<span style="font-weight:600">' + dt + '</span> <span style="font-size:11px;color:var(--accent-light);margin-left:4px">Today</span>';
-    } else {
-      el.textContent = dt;
+  console.log('[061] loadDates: starting');
+  try {
+    const resp = await fetch('/api/dates');
+    const d = await resp.json();
+    console.log('[061] loadDates: got', (d.sidebar || []).length, 'sidebar entries');
+    const list = document.getElementById('date-list');
+    list.innerHTML = '';
+    var todayDate = null;
+    // Use sidebar (past 7 days) if available
+    var entries = d.sidebar || d.dates.map(function(dt) { return {date: dt, is_today: false, has_data: true}; });
+    entries.forEach(function(entry) {
+      var dt = typeof entry === 'string' ? entry : entry.date;
+      var isToday = entry.is_today || false;
+      var hasData = entry.has_data !== false;
+      var el = document.createElement('div');
+      el.className = 'date-item';
+      if (isToday) {
+        todayDate = dt;
+        el.innerHTML = '<span style="font-weight:600">' + dt + '</span> <span style="font-size:11px;color:var(--accent-light);margin-left:4px">Today</span>';
+      } else {
+        el.textContent = dt;
+      }
+      // Data indicator dot
+      var dot = document.createElement('span');
+      dot.className = 'dot' + (hasData ? ' has-data' : '');
+      dot.style.marginLeft = 'auto';
+      el.appendChild(dot);
+      el.setAttribute('data-date', dt);
+      el.addEventListener('click', function() { selectDate(dt); });
+      list.appendChild(el);
+    });
+    // Auto-select today
+    if (todayDate) {
+      console.log('[061] loadDates: auto-selecting today:', todayDate);
+      selectDate(todayDate);
     }
-    // Data indicator dot
-    var dot = document.createElement('span');
-    dot.className = 'dot' + (hasData ? ' has-data' : '');
-    dot.style.marginLeft = 'auto';
-    el.appendChild(dot);
-    el.setAttribute('data-date', dt);
-    el.addEventListener('click', function() { selectDate(dt); });
-    list.appendChild(el);
-  });
-  // Auto-select today
-  if (todayDate) {
-    selectDate(todayDate);
+  } catch (e) {
+    console.error('[061] loadDates FAILED:', e);
+    document.getElementById('main').innerHTML = '<div class="empty-state" style="color:#ef4444">loadDates error: ' + e.message + '</div>';
   }
 }
 
@@ -1829,19 +1897,39 @@ async function selectDate(dt) {
 async function loadDateView(dt) {
   const main = document.getElementById('main');
   main.innerHTML = '<div class="empty-state">Loading...</div>';
+  console.log('[061] loadDateView: fetching data for', dt);
 
-  // Fetch local data and Notion status in parallel
-  const [dataResp, notionResp] = await Promise.all([
-    fetch('/api/data/' + dt),
-    fetch('/api/notion/' + dt).catch(function() { return {ok: false}; }),
-  ]);
-  const data = await dataResp.json();
-  let notion = null;
-  if (notionResp.ok) {
-    notion = await notionResp.json();
+  try {
+    // Fetch local data and Notion status in parallel
+    const [dataResp, notionResp] = await Promise.all([
+      fetch('/api/data/' + dt),
+      fetch('/api/notion/' + dt).catch(function(e) {
+        console.warn('[061] Notion fetch failed:', e);
+        return {ok: false};
+      }),
+    ]);
+
+    console.log('[061] loadDateView: data status=' + dataResp.status + ', notion status=' + (notionResp.status || 'caught'));
+
+    const data = await dataResp.json();
+    console.log('[061] loadDateView: data keys=', Object.keys(data));
+
+    let notion = null;
+    if (notionResp.ok) {
+      notion = await notionResp.json();
+      console.log('[061] loadDateView: notion daily_log=' + (notion.daily_log ? 'found' : 'null') +
+        ', briefs=' + (notion.meeting_briefs ? notion.meeting_briefs.length : 0) +
+        ', init_errors=' + (notion.init_errors || 'none'));
+    } else {
+      console.warn('[061] loadDateView: notion response not ok');
+    }
+
+    renderDateView(dt, data, notion);
+    console.log('[061] loadDateView: render complete');
+  } catch (e) {
+    console.error('[061] loadDateView FAILED:', e);
+    main.innerHTML = '<div class="empty-state" style="color:#ef4444">Load error: ' + e.message + '<br>Check browser console (F12) for details.</div>';
   }
-
-  renderDateView(dt, data, notion);
 }
 
 var _cachedNotion = null;
@@ -2392,7 +2480,7 @@ function simpleMarkdown(text) {
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/^- (.+)$/gm, '<li style="margin-left:16px;list-style:disc">$1</li>');
   s = s.replace(/^\d+\. (.+)$/gm, '<li style="margin-left:16px;list-style:decimal">$1</li>');
-  s = s.replace(/\n/g, '<br>');
+  s = s.replace(/\\n/g, '<br>');
   return s;
 }
 
@@ -2735,6 +2823,17 @@ def run_server(
     ]:
         logger.info("Data dir [%s]: %s (exists=%s)", label, path, path.is_dir())
 
+    # Resolve Notion data_source_ids once (expensive: ~15s first time)
+    logger.info("Initializing Notion data_source resolution...")
+    _init_notion()
+    if _notion_init_errors:
+        for err in _notion_init_errors:
+            logger.warning("Notion init issue: %s", err)
+    else:
+        logger.info("Notion init complete: daily_logs=%s, meeting_briefs=%s",
+                     "OK" if _resolved_daily_logs else "skipped",
+                     "OK" if _resolved_meeting_briefs else "skipped")
+
     import uvicorn
 
     app = _build_app()
@@ -2747,7 +2846,8 @@ def run_server(
         threading.Thread(target=_open, daemon=True).start()
 
     logger.info("Daily Console available at %s", url)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvi_log = "info" if verbose else "warning"
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level=uvi_log)
 
 
 # ── CLI ───────────────────────────────────────────────────────────

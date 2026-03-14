@@ -421,7 +421,8 @@ _RESEARCH_QUESTIONS_SYSTEM = (
     "projects, or areas of interest mentioned in the log.\n"
     "Return a JSON array of question strings. Each question should be specific enough "
     "for a research pipeline to investigate (e.g. person names, company names, topics).\n"
-    "Generate 2-5 questions. Output ONLY the JSON array, no explanation."
+    "Generate 2-5 questions. Output ONLY the JSON array, no explanation.\n"
+    "All questions MUST be written in Japanese (日本語)."
 )
 
 

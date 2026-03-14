@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 073):
+▪️ Progress Summary (as of Day 077):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -188,6 +188,14 @@ Day 071 focused on integrating validated evidence to generate coherent research 
 Day 072 focused on generating a structured research memo summarizing findings, evidence, and claims. It publishes the results to the Knowledge Memory Layer in Notion while saving local JSON artifacts, ensuring durable knowledge storage and reproducibility of each research run.
 
 Day 073 focused on orchestrating the entire Deep Research pipeline through a single user interaction layer. It decomposes complex questions, runs the planner-to-publisher workflow for each subquestion, aggregates results, and returns a unified answer while logging the session for reuse.
+
+Day 074 focused on automating the literature inbox workflow: fetching PDFs for papers registered in the LIT database, running LLM-based relevance judgment (READ/KEEP/SKIP), and updating each paper's decision and PDF status — replacing the manual triage that previously required human review of every incoming paper.                                                               
+                                                            
+Day 075 focused on replacing the four daily news monitoring scripts (032–035) with a single frequency-optimized monitor that assigns each target a hash-based check day, searches Google and NewsAPI on schedule, writes deduplicated events, and applies a cadence state machine that demotes quiet targets from weekly to monthly to paused.
+
+Day 076 focused on closing the loop between deep research sessions and news monitoring: scanning recent 073 session outputs, extracting company and person entities as target candidates with LLM assistance, validating people names to prevent false positives, checking for duplicates, and registering new targets with full provenance tracking back to the originating session.
+
+Day 077 focused on making the events database accessible to the research planner: fetching recent high-confidence events from Notion, building a keyword-indexed context cache, and wiring it into the 067 planner's recall path so that upcoming research sessions can automatically incorporate relevant recent events as background context without any manual curation.
 
 ▪️ Technical Environment:
 

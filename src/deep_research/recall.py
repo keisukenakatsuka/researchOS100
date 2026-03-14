@@ -51,20 +51,28 @@ def extract_keywords(request: str) -> List[str]:
     """Extract search keywords from a request string.
 
     Simple approach:
-    - Split on whitespace, punctuation, and Japanese particles
+    - Split on whitespace, punctuation, and CJK particles
+    - Split at CJK/Latin script boundaries (handles mixed text like "Capital在2023")
     - Remove stop words and short tokens
     - Deduplicate while preserving order
     """
     # First split on whitespace and punctuation
     tokens = re.split(r'[\s、。,.\-/;:?!！？「」（）()\[\]]+', request)
 
-    # Further split Japanese text on common particles
+    # Split at CJK/Latin script boundaries and on CJK particles
     expanded: List[str] = []
     for token in tokens:
-        # If token contains CJK, split on particles
+        # If token contains CJK, split on particles and script boundaries
         if any("\u3000" <= c <= "\u9fff" for c in token):
-            parts = re.split(r'[のはがをにでともか]', token)
-            expanded.extend(parts)
+            # Split at boundaries between CJK and non-CJK characters
+            boundary_parts = re.split(r'(?<=[\u3000-\u9fff])(?=[^\u3000-\u9fff])|(?<=[^\u3000-\u9fff])(?=[\u3000-\u9fff])', token)
+            for part in boundary_parts:
+                # Further split CJK parts on JA/ZH particles
+                if any("\u3000" <= c <= "\u9fff" for c in part):
+                    sub = re.split(r'[のはがをにでともか的和在了從到與]', part)
+                    expanded.extend(sub)
+                else:
+                    expanded.append(part)
         else:
             expanded.append(token)
 

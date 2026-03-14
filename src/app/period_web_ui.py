@@ -570,6 +570,31 @@ body {{
 }}
 .sidebar-header .period-info {{
   font-size: 13px; color: var(--text2);
+  flex: 1; text-align: center;
+}}
+.period-nav {{
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+}}
+.nav-btn {{
+  width: 28px; height: 28px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface2); color: var(--text);
+  cursor: pointer; font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s; flex-shrink: 0;
+}}
+.nav-btn:hover {{
+  background: var(--border); border-color: var(--accent);
+}}
+.nav-today-btn {{
+  margin-top: 6px; padding: 4px 12px;
+  border: 1px solid var(--accent); border-radius: 6px;
+  background: transparent; color: var(--accent);
+  cursor: pointer; font-size: 11px; font-weight: 500;
+  transition: all 0.15s;
+}}
+.nav-today-btn:hover {{
+  background: var(--accent); color: #fff;
 }}
 .sidebar-section {{
   padding: 16px 20px; border-bottom: 1px solid var(--border);
@@ -748,7 +773,12 @@ body {{
 <div class="sidebar">
   <div class="sidebar-header">
     <h2>{config.script_id} {config.title}</h2>
-    <div class="period-info" id="period-info">Loading...</div>
+    <div class="period-nav">
+      <button class="nav-btn" onclick="navigatePeriod(-1)" title="Previous period">&#9664;</button>
+      <div class="period-info" id="period-info">Loading...</div>
+      <button class="nav-btn" onclick="navigatePeriod(1)" title="Next period">&#9654;</button>
+    </div>
+    <button class="nav-today-btn" id="today-btn" onclick="goToToday()" style="display:none">Today</button>
   </div>
 
   <div id="planning-context-sidebar"></div>
@@ -802,6 +832,42 @@ const CONFIG = {{
   planningContextFields: {planning_context_fields_json},
   valueDomains: {value_domains_json},
 }};
+
+let targetDate = null;
+
+function getTargetDateParam() {{
+  return targetDate ? `?date=${{targetDate}}` : '';
+}}
+
+function getTargetDateValue() {{
+  return targetDate || new Date().toISOString().slice(0, 10);
+}}
+
+function navigatePeriod(direction) {{
+  const current = targetDate
+    ? new Date(targetDate + 'T00:00:00')
+    : new Date();
+  if (CONFIG.periodType === 'Weekly') {{
+    current.setDate(current.getDate() + (direction * 7));
+  }} else {{
+    current.setDate(1);
+    current.setMonth(current.getMonth() + direction);
+  }}
+  targetDate = current.toISOString().slice(0, 10);
+  reloadPeriodData();
+}}
+
+function goToToday() {{
+  targetDate = null;
+  reloadPeriodData();
+}}
+
+async function reloadPeriodData() {{
+  const dateParam = getTargetDateParam();
+  await loadPeriodInfo(dateParam);
+  await loadExisting(dateParam);
+  if (CONFIG.hasPlanningContext) await loadPlanningContext(dateParam);
+}}
 
 let mediaRecorders = {{}};
 let audioChunks = {{}};
@@ -874,9 +940,10 @@ function renderScoreFields() {{
 }}
 
 // ── Load period info ──
-async function loadPeriodInfo() {{
+async function loadPeriodInfo(dateParam) {{
+  dateParam = dateParam || '';
   try {{
-    const resp = await fetch('/api/period-info');
+    const resp = await fetch('/api/period-info' + dateParam);
     const data = await resp.json();
     if (data.ok) {{
       document.getElementById('period-info').innerHTML =
@@ -884,15 +951,18 @@ async function loadPeriodInfo() {{
       document.getElementById('main-subtitle').textContent =
         `${{CONFIG.periodType}} ${{CONFIG.logType}} — ${{data.period_name}}`;
     }}
+    const todayBtn = document.getElementById('today-btn');
+    if (todayBtn) todayBtn.style.display = targetDate ? 'block' : 'none';
   }} catch (e) {{
     document.getElementById('period-info').textContent = 'Failed to load';
   }}
 }}
 
 // ── Load existing Notion content ──
-async function loadExisting() {{
+async function loadExisting(dateParam) {{
+  dateParam = dateParam || '';
   try {{
-    const resp = await fetch('/api/existing');
+    const resp = await fetch('/api/existing' + dateParam);
     const data = await resp.json();
     const container = document.getElementById('existing-content');
 
@@ -918,12 +988,17 @@ async function loadExisting() {{
 }}
 
 // ── Load planning context (reviews only) ──
-async function loadPlanningContext() {{
+async function loadPlanningContext(dateParam) {{
+  dateParam = dateParam || '';
   try {{
-    const resp = await fetch('/api/planning-context');
+    const resp = await fetch('/api/planning-context' + dateParam);
     const data = await resp.json();
 
-    if (!data.ok || !data.has_data) return;
+    if (!data.ok || !data.has_data) {{
+      document.getElementById('planning-context-banner').innerHTML = '';
+      document.getElementById('planning-context-sidebar').innerHTML = '';
+      return;
+    }}
 
     let html = '<div class="planning-context"><h3>Reference — Planning</h3>';
     for (const [key, value] of Object.entries(data.fields)) {{
@@ -1039,7 +1114,7 @@ async function submitAll() {{
     const resp = await fetch('/api/submit', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ sections, scores, no_llm: noLlm }}),
+      body: JSON.stringify({{ sections, scores, no_llm: noLlm, date: getTargetDateValue() }}),
     }});
     const data = await resp.json();
 
@@ -1051,7 +1126,7 @@ async function submitAll() {{
         (pageUrl ? ` — <a href="${{pageUrl}}" target="_blank" style="color:var(--green)">Open in Notion</a>` : '') +
         `<br><small>Input: ${{data.input_chars}} chars | LLM: ${{data.llm_used ? 'Yes' : 'No'}}</small>`;
       // Refresh sidebar
-      await loadExisting();
+      await loadExisting(getTargetDateParam());
     }} else {{
       resultBanner.className = 'result-banner error';
       resultBanner.textContent = 'Save failed: ' + (data.error || JSON.stringify(data));

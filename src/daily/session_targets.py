@@ -452,10 +452,14 @@ def run_session_to_targets(
     llm_client: Any,
     hours: int = 24,
     dry_run: bool = False,
+    limit: int = 0,
     sessions_dir: Path = _SESSIONS_DIR,
     runs_dir: Path = _RUNS_DIR,
 ) -> Dict[str, Any]:
     """Run the session-to-targets pipeline.
+
+    Args:
+        limit: Max number of targets to register (0 = unlimited).
 
     Returns a summary dict with counts and per-candidate results.
     """
@@ -485,7 +489,6 @@ def run_session_to_targets(
     # Fetch existing targets for dedup
     pages = notion_client.query_data_source(
         data_source_id=targets_data_source_id,
-        filter={},
         fetch_all=True,
     )
     existing_targets = normalize_targets(pages)
@@ -563,6 +566,13 @@ def run_session_to_targets(
                     summary["duplicates_skipped"] += 1
                     result_entry["action"] = "skipped"
                     result_entry["reason"] = f"duplicate of '{dup.get('name', '?')}'"
+                    summary["results"].append(result_entry)
+                    continue
+
+                # Limit check
+                if limit > 0 and summary["registered"] >= limit:
+                    result_entry["action"] = "skipped"
+                    result_entry["reason"] = f"limit reached ({limit})"
                     summary["results"].append(result_entry)
                     continue
 

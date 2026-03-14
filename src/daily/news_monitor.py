@@ -43,17 +43,18 @@ def assign_check_day(target_id: str) -> int:
 def compute_next_check(cadence: str, target_id: str, now: date) -> Optional[date]:
     """Compute the next check date for a target.
 
-    Weekly: next occurrence of this target's check day.
+    Weekly/Daily: next occurrence of this target's check day.
     Monthly: now + 30 days.
     Other (Paused/Archived): None.
     """
-    if cadence == "Weekly":
+    cadence_l = (cadence or "").strip().lower()
+    if cadence_l in ("weekly", "daily"):
         check_day = assign_check_day(target_id)
         days_ahead = (check_day - now.weekday()) % 7
         if days_ahead == 0:
             days_ahead = 7  # already ran today → next week
         return now + timedelta(days=days_ahead)
-    elif cadence == "Monthly":
+    elif cadence_l == "monthly":
         return now + timedelta(days=MONTHLY_CHECK_INTERVAL_DAYS)
     return None
 
@@ -75,8 +76,8 @@ def get_todays_targets(
     for t in targets:
         if not t.get("enabled"):
             continue
-        status = (t.get("status") or "").strip()
-        if status not in ("Active",):
+        status = (t.get("status") or "").strip().lower()
+        if status != "active":
             continue
         next_check = t.get("next_check", "")
         if next_check:
@@ -144,6 +145,77 @@ def search_target(
         logger.warning("[%s] NewsAPI failed: %s", target["name"][:40], e)
 
     return results
+
+
+# -- Relevance filter --------------------------------------------------------
+
+_RELEVANCE_MIN_SCORE = 2
+
+
+def _tokenize_lower(text: str) -> set[str]:
+    """Split text into lowercase tokens for matching."""
+    import re as _re
+    return {t.lower() for t in _re.split(r'[\s,.\-/;:?!！？「」（）()\[\]+]+', text) if len(t) >= 2}
+
+
+def score_result_relevance(
+    result: Dict[str, Any],
+    target: Dict[str, Any],
+) -> int:
+    """Score how relevant a search result is to the target.
+
+    Scoring:
+    - target name tokens found in title or snippet → +2 per token hit
+    - target search_keywords tokens found → +1 per token hit
+
+    Returns the total score.
+    """
+    title_snippet = f"{result.get('title', '')} {result.get('snippet', '')}".lower()
+
+    score = 0
+
+    # Target name tokens
+    name = target.get("name", "")
+    name_tokens = _tokenize_lower(name)
+    for tok in name_tokens:
+        if tok in title_snippet:
+            score += 2
+
+    # Search keywords tokens
+    kw = target.get("search_keywords", "")
+    if kw:
+        kw_tokens = _tokenize_lower(kw) - name_tokens  # avoid double counting
+        for tok in kw_tokens:
+            if tok in title_snippet:
+                score += 1
+
+    return score
+
+
+def filter_relevant_results(
+    results: List[Dict[str, Any]],
+    target: Dict[str, Any],
+    *,
+    min_score: int = _RELEVANCE_MIN_SCORE,
+) -> List[Dict[str, Any]]:
+    """Filter search results by relevance to the target."""
+    relevant = []
+    for r in results:
+        s = score_result_relevance(r, target)
+        if s >= min_score:
+            r["relevance_score"] = s
+            relevant.append(r)
+        else:
+            logger.debug(
+                "[%s] Filtered out (score=%d): %s",
+                target["name"][:30], s, r.get("title", "")[:60],
+            )
+    if len(results) != len(relevant):
+        logger.info(
+            "[%s] Relevance filter: %d → %d results",
+            target["name"][:30], len(results), len(relevant),
+        )
+    return relevant
 
 
 # -- Dedup -------------------------------------------------------------------
@@ -250,8 +322,9 @@ def apply_cadence_transition(
     - M0 + news → W0, misses=0, last_hit_at=now
     - M0 + no news → misses+1; if misses>=3 → Paused
     """
-    cadence = (target.get("cadence") or "Weekly").strip()
-    status = (target.get("status") or "Active").strip()
+    cadence_raw = (target.get("cadence") or "Weekly").strip()
+    cadence = cadence_raw.lower()
+    status = (target.get("status") or "Active").strip().lower()
     misses = target.get("consecutive_misses", 0) or 0
     today = date.today()
     now_iso = today.isoformat()
@@ -263,33 +336,33 @@ def apply_cadence_transition(
     if news_found:
         updates["consecutive_misses"] = 0
         updates["last_hit_at"] = now_iso
-        if cadence == "Monthly" and status == "Active":
+        if cadence == "monthly" and status == "active":
             # Monthly → Weekly promotion
             updates["cadence"] = "Weekly"
             updates["cadence_reason"] = "news found → weekly"
             updates["next_check"] = compute_next_check("Weekly", target["page_id"], today)
             logger.info("[%s] Monthly → Weekly (news found)", target["name"][:40])
         else:
-            updates["next_check"] = compute_next_check(cadence, target["page_id"], today)
+            updates["next_check"] = compute_next_check(cadence_raw, target["page_id"], today)
     else:
         new_misses = misses + 1
         updates["consecutive_misses"] = new_misses
 
-        if cadence == "Weekly" and new_misses >= WEEKLY_TO_MONTHLY_MISSES:
+        if cadence in ("weekly", "daily") and new_misses >= WEEKLY_TO_MONTHLY_MISSES:
             # Weekly → Monthly demotion
             updates["cadence"] = "Monthly"
             updates["consecutive_misses"] = 0
             updates["cadence_reason"] = f"{WEEKLY_TO_MONTHLY_MISSES} weekly misses → monthly"
             updates["next_check"] = compute_next_check("Monthly", target["page_id"], today)
             logger.info("[%s] Weekly → Monthly (%d misses)", target["name"][:40], new_misses)
-        elif cadence == "Monthly" and new_misses >= MONTHLY_TO_PAUSED_MISSES:
+        elif cadence == "monthly" and new_misses >= MONTHLY_TO_PAUSED_MISSES:
             # Monthly → Paused
             updates["status"] = "Paused"
             updates["cadence_reason"] = f"{MONTHLY_TO_PAUSED_MISSES} monthly misses → paused"
             updates["next_check"] = None
             logger.info("[%s] Monthly → Paused (%d misses)", target["name"][:40], new_misses)
         else:
-            updates["next_check"] = compute_next_check(cadence, target["page_id"], today)
+            updates["next_check"] = compute_next_check(cadence_raw, target["page_id"], today)
 
     return updates
 
@@ -483,6 +556,9 @@ def run_smart_monitor(
                 news_client=news_client,
             )
 
+            # Relevance filter — drop results unrelated to the target
+            results = filter_relevant_results(results, target)
+
             # Dedup
             unique_results = dedup_results(results, existing_keys)
             news_found = len(unique_results) > 0
@@ -551,4 +627,80 @@ def run_smart_monitor(
         # Notion API rate limit
         time.sleep(_NOTION_DELAY_SEC)
 
+    return summary
+
+
+# -- Migration ---------------------------------------------------------------
+
+
+def migrate_targets(
+    *,
+    notion_client: Any,
+    targets_data_source_id: str,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """One-shot migration: set Next Check + Cadence=Weekly for Active targets.
+
+    Normalizes legacy cadence values (DAILY/WEEKLY → Weekly) and computes
+    hash-based Next Check dates for even distribution across the week.
+    """
+    from src.notion.targets_normalize import normalize_targets
+
+    pages = notion_client.query_data_source(
+        data_source_id=targets_data_source_id,
+        filter={"property": "Enabled", "checkbox": {"equals": True}},
+        fetch_all=True,
+    )
+    all_targets = normalize_targets(pages)
+    today = date.today()
+
+    migrated = 0
+    skipped = 0
+
+    for t in all_targets:
+        status = (t.get("status") or "").strip().lower()
+        if status != "active":
+            skipped += 1
+            continue
+
+        cadence_raw = (t.get("cadence") or "").strip().lower()
+        # Normalize: DAILY/WEEKLY/empty → Weekly
+        new_cadence = "Weekly"
+        if cadence_raw == "monthly":
+            new_cadence = "Monthly"
+
+        next_check = compute_next_check(new_cadence, t["page_id"], today)
+
+        logger.info(
+            "  [%s] %s → cadence=%s next_check=%s",
+            t["name"][:40],
+            cadence_raw or "(empty)",
+            new_cadence,
+            next_check,
+        )
+
+        if not dry_run:
+            update_target_operational(
+                notion_client,
+                t["page_id"],
+                {
+                    "cadence": new_cadence,
+                    "next_check": next_check,
+                    "consecutive_misses": 0,
+                },
+            )
+            time.sleep(_NOTION_DELAY_SEC)
+
+        migrated += 1
+
+    summary = {
+        "total": len(all_targets),
+        "migrated": migrated,
+        "skipped": skipped,
+        "dry_run": dry_run,
+    }
+    logger.info(
+        "Migration complete: %d migrated, %d skipped (dry_run=%s)",
+        migrated, skipped, dry_run,
+    )
     return summary

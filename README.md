@@ -43,7 +43,7 @@ docs/
 
 Private drafts, intermediate experiments, and raw datasets are managed separately in a private repository.
 
-▪️ Progress Summary (as of Day 077):
+▪️ Progress Summary (as of Day 087):
 
 Day 001 focused on designing and implementing the initial arXiv ingestion workflow, enabling daily monitoring of research related to startups, venture capital, and innovation policy.
 
@@ -196,6 +196,26 @@ Day 075 focused on replacing the four daily news monitoring scripts (032–035) 
 Day 076 focused on closing the loop between deep research sessions and news monitoring: scanning recent 073 session outputs, extracting company and person entities as target candidates with LLM assistance, validating people names to prevent false positives, checking for duplicates, and registering new targets with full provenance tracking back to the originating session.
 
 Day 077 focused on making the events database accessible to the research planner: fetching recent high-confidence events from Notion, building a keyword-indexed context cache, and wiring it into the 067 planner's recall path so that upcoming research sessions can automatically incorporate relevant recent events as background context without any manual curation.
+
+Day 078 focused on replacing the notebook-based daily orchestrator with a script-driven pipeline: running LIT inbox processing, PDF ingestion, session-to-targets extraction, smart news monitoring, and events context bridging in strict dependency order with subprocess isolation, per-step timeouts, and a unified summary report.
+
+Day 079 focused on building the Block 3 entry point: scoring every paper in the LIT database against a Research Question using batched LLM relevance judgments, filtering candidates above a configurable threshold, and generating a ranked shortlist that feeds into evidence extraction and literature review synthesis downstream.
+
+Day 080 focused on supplementing the LIT database with externally discovered papers: generating search queries from the RQ context, querying Semantic Scholar and arXiv in parallel, deduplicating results against existing holdings using Source UID and title matching, and optionally registering recommended papers back into Notion.
+
+Day 081 focused on extracting structured evidence from each candidate paper through the lens of the Research Question: classifying findings into mechanism, outcome, condition, method, and limitation dimensions with calibrated confidence scores, producing a query-focused evidence set ready for cross-paper synthesis.
+
+Day 082 focused on synthesizing extracted evidence into a structured literature review: identifying theoretical streams across papers, classifying findings as established, emerging, or contested, surfacing research gaps as open questions, and outputting both a reusable JSON knowledge structure and a human-readable Markdown report.
+
+Day 083 focused on mapping the research landscape around an RQ: normalizing dimensions extracted during synthesis, building an RQ-centered knowledge graph of theories, methods, datasets, and findings, and identifying hotspots, blindspots, and concrete research opportunities that connect structural gaps to feasible study designs.
+
+Day 084 focused on persisting Block 3 outputs into the Knowledge Memory Layer: upserting evidence items, literature-review-derived claims, Lit Review and Landscape memos, and a Research Run record into their respective Notion databases, with idempotent ID-based writes and full relation linking across all entity types.
+
+Day 085 focused on enabling cross-RQ analysis: loading Lit Review and Landscape outputs from multiple runs, using a single LLM pass to identify shared and unique theoretical streams, converging and diverging findings, common blindspots, and cross-cutting research opportunities that emerge only when viewing multiple questions together.
+
+Day 086 focused on introducing a canonical claim layer to the Knowledge Memory Layer: collecting run-local claims across multiple Block 3 runs, grouping semantically identical findings through LLM-based clustering, generating content-hash-addressed canonical claims with conservative confidence scoring, and upserting them into the Claims database for cross-run knowledge reuse.
+
+Day 087 focused on launching Block 4 by generating testable research hypotheses: combining canonical claims, open questions, blindspots, and cross-RQ opportunities through four strategies—gap-driven, claim-combination, contested-resolution, and cross-RQ—producing hypotheses with testability ratings and suggested verification approaches, then persisting them to the Claims database for downstream assumption analysis.
 
 ▪️ Technical Environment:
 

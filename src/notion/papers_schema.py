@@ -48,8 +48,8 @@ PAPERS_CORE_PROPERTIES: Dict[str, str] = {
     "Core Idea": "rich_text",
     "Notes": "rich_text",
     "Methods": "rich_text",
-    "Type": "select",
-    "Source": "select",
+    "Type": "rich_text",
+    "Source": "rich_text",
     "Datasets": "rich_text",
     "Papers": "relation",
 }

@@ -177,10 +177,9 @@ def _verify_drive(drive_service, drive_folder_id: str, *, require: bool = False)
 def _init_notion_wrappers():
     """Initialize Notion client and return wrapper functions.
 
-    Uses the same approach as 029_notion_clients_and_io.ipynb:
-    runs the notebook-defined wrappers via the 029 module.
-
-    Falls back to None for each wrapper if initialization fails.
+    Uses build_notion_client_from_env() + NotionDataSourceResolver to build
+    wrappers compatible with src.pdf.pipeline / src.pdf.notion_adapter.
+    No dependency on 029 notebook.
     """
     wrappers = {
         "create_paper_inbox": None,
@@ -192,7 +191,6 @@ def _init_notion_wrappers():
     }
 
     try:
-        # Check if Notion token is available
         notion_token = os.getenv("NOTION_TOKEN", "").strip() or os.getenv("NOTION_API_KEY", "").strip()
         if not notion_token:
             logger.warning("NOTION_TOKEN not set; Notion features disabled")
@@ -203,46 +201,166 @@ def _init_notion_wrappers():
             logger.warning("NOTION_LIT_DB_ID not set; Notion features disabled")
             return wrappers
 
-        # Execute the 029 notebook to get the wrappers
-        import nbformat
+        from src.notion import build_notion_client_from_env, NotionDataSourceResolver
 
-        nb029_path = _PROJECT_ROOT / "notebooks" / "029_notion_clients_and_io.ipynb"
+        client = build_notion_client_from_env()
+        resolver = NotionDataSourceResolver(client)
+        resolved = resolver.resolve_once(name="LIT_DB", database_id=lit_db_id)
+        data_source_id = resolved.data_source_id
 
-        if not nb029_path.exists():
-            logger.warning("029 notebook not found at %s; Notion features disabled", nb029_path)
-            return wrappers
+        logger.info(
+            "Notion client initialized: LIT_DB database_id=%s data_source_id=%s",
+            lit_db_id[:12], data_source_id[:12],
+        )
 
-        # Execute key notebook cells via exec() to extract wrapper functions.
-        nb = nbformat.read(str(nb029_path), as_version=4)
+        # --- Notion property helpers ---
+        def _rich_text(text):
+            if not text:
+                return {"rich_text": []}
+            return {"rich_text": [{"text": {"content": str(text)[:2000]}}]}
 
-        # Build a namespace with the environment already loaded
-        ns = {
-            "__builtins__": __builtins__,
-            "NOTION_TOKEN": notion_token,
-            "NOTION_LIT_DB_ID": lit_db_id,
-        }
+        def _title(text):
+            return {"title": [{"text": {"content": str(text or "")[:2000]}}]}
 
-        for cell in nb.cells:
-            if cell.cell_type != "code":
-                continue
-            source = "".join(cell.source)
-            if "%run" in source or "get_ipython" in source:
-                continue
-            if "Self-test" in source or "self_test" in source:
-                continue
-            try:
-                exec(compile(source, "<029_cell>", "exec"), ns)
-            except Exception:
-                continue
+        def _select(value):
+            if not value:
+                return {"select": None}
+            return {"select": {"name": str(value)}}
+
+        def _multi_select(values):
+            if not values:
+                return {"multi_select": []}
+            return {"multi_select": [{"name": str(v)} for v in values if v]}
+
+        def _url(value):
+            if not value:
+                return {"url": None}
+            return {"url": str(value)}
+
+        def _date(value):
+            if not value:
+                return {"date": None}
+            return {"date": {"start": str(value)}}
+
+        # --- Wrapper: create_paper_inbox ---
+        def create_paper_inbox(
+            *, name, authors_year="", pdf_link=None, tags=None,
+            status="INBOX", pdf_status="LOCAL", dedup_key="",
+            source_uid="", run_id="", slide1_url=None, extra=None,
+        ):
+            notion_fields = (extra or {}).get("notion_fields") or {}
+
+            properties = {
+                "Name": _title(name),
+                "Authors & Year": _rich_text(authors_year),
+                "Status": _select(status),
+                "PDF Status": _select(pdf_status),
+                "Dedup Key": _rich_text(dedup_key),
+                "Source UID": _rich_text(source_uid),
+                "Run ID": _rich_text(run_id),
+                "Ingested At": _date(datetime.today().date().isoformat()),
+            }
+            if pdf_link:
+                properties["PDF Link"] = _url(pdf_link)
+            if slide1_url:
+                properties["Slide 1 URL"] = _url(slide1_url)
+            if tags:
+                properties["Tags"] = _multi_select(tags)
+
+            for field, prop in [
+                ("core_idea", "Core Idea"), ("findings", "Findings"),
+                ("methods", "Methods"), ("notes", "Notes"),
+                ("datasets", "Datasets"),
+            ]:
+                val = notion_fields.get(field)
+                if val:
+                    properties[prop] = _rich_text(val)
+            if notion_fields.get("type"):
+                properties["Type"] = _rich_text(notion_fields["type"])
+            if notion_fields.get("source"):
+                properties["Source"] = _rich_text(notion_fields["source"])
+
+            result = client.create_page(parent_db_id=lit_db_id, properties=properties)
+            page_id = result.get("id")
+            return {"page_id": page_id, "id": page_id}
+
+        # --- Wrapper: find_duplicate_by_doi ---
+        def find_duplicate_by_doi(doi):
+            if not doi:
+                return None
+            uid = f"doi:{doi.lower().strip()}"
+            pages = client.query_data_source(
+                data_source_id=data_source_id,
+                filter={"property": "Source UID", "rich_text": {"equals": uid}},
+                page_size=1, fetch_all=False,
+            )
+            return pages[0] if pages else None
+
+        # --- Wrapper: find_duplicate_by_arxiv_id ---
+        def find_duplicate_by_arxiv_id(arxiv_id):
+            if not arxiv_id:
+                return None
+            uid = f"arxiv:{arxiv_id.lower().strip()}"
+            pages = client.query_data_source(
+                data_source_id=data_source_id,
+                filter={"property": "Source UID", "rich_text": {"equals": uid}},
+                page_size=1, fetch_all=False,
+            )
+            return pages[0] if pages else None
+
+        # --- Wrapper: find_duplicate_by_title ---
+        def find_duplicate_by_title(title_norm):
+            if not title_norm:
+                return None
+            pages = client.query_data_source(
+                data_source_id=data_source_id,
+                filter={"property": "Name", "title": {"equals": title_norm}},
+                page_size=1, fetch_all=False,
+            )
+            return pages[0] if pages else None
+
+        # --- Wrapper: find_duplicate_paper (generic) ---
+        def find_duplicate_paper(*, name, dedup_key, source_uid, pdf_link):
+            if dedup_key:
+                pages = client.query_data_source(
+                    data_source_id=data_source_id,
+                    filter={"property": "Dedup Key", "rich_text": {"equals": dedup_key}},
+                    page_size=1, fetch_all=False,
+                )
+                if pages:
+                    return (True, pages[0].get("id"), "dedup_key")
+            if source_uid:
+                pages = client.query_data_source(
+                    data_source_id=data_source_id,
+                    filter={"property": "Source UID", "rich_text": {"equals": source_uid}},
+                    page_size=1, fetch_all=False,
+                )
+                if pages:
+                    return (True, pages[0].get("id"), "source_uid")
+            return (False, None, None)
+
+        # --- Wrapper: update_paper_links ---
+        def update_paper_links(page_id, pdf_link, slide1_url):
+            properties = {}
+            if pdf_link:
+                properties["PDF Link"] = _url(pdf_link)
+            if slide1_url:
+                properties["Slide 1 URL"] = _url(slide1_url)
+            if not properties:
+                return {}
+            return client.update_page(page_id=page_id, properties=properties)
+
+        wrappers["create_paper_inbox"] = create_paper_inbox
+        wrappers["find_duplicate_paper"] = find_duplicate_paper
+        wrappers["find_duplicate_by_doi"] = find_duplicate_by_doi
+        wrappers["find_duplicate_by_arxiv_id"] = find_duplicate_by_arxiv_id
+        wrappers["find_duplicate_by_title"] = find_duplicate_by_title
+        wrappers["update_paper_links"] = update_paper_links
 
         for name in wrappers:
-            fn = ns.get(name)
-            if callable(fn):
-                wrappers[name] = fn
+            if wrappers[name] is not None:
                 logger.info("Notion wrapper loaded: %s", name)
 
-    except ImportError:
-        logger.warning("nbformat not available; Notion features disabled")
     except Exception as e:
         logger.warning("Notion wrapper initialization failed: %s", e)
 

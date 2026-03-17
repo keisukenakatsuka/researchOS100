@@ -283,14 +283,15 @@ def _run_status(steps: Dict) -> str:
 
 
 def get_artifacts(run_dir: Path) -> List[Dict[str, Any]]:
-    """List available artifacts (.md and .json) in a run directory."""
+    """List available artifacts (.md, .json, .html) in a run directory."""
     artifacts = []
+    type_map = {".md": "markdown", ".json": "json", ".html": "graph"}
     for f in sorted(run_dir.iterdir()):
-        if f.suffix in (".md", ".json") and f.name != MANIFEST_FILE:
+        if f.suffix in type_map and f.name != MANIFEST_FILE:
             artifacts.append({
                 "name": f.name,
                 "path": str(f),
-                "type": "markdown" if f.suffix == ".md" else "json",
+                "type": type_map[f.suffix],
                 "size": f.stat().st_size,
             })
     return artifacts

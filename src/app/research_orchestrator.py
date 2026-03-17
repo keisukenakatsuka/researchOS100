@@ -435,10 +435,15 @@ def render_artifact_viewer():
     # Artifact selector
     md_artifacts = [a for a in artifacts if a["type"] == "markdown"]
     json_artifacts = [a for a in artifacts if a["type"] == "json"]
+    graph_artifacts = [a for a in artifacts if a["type"] == "graph"]
 
-    tab_md, tab_json = st.tabs(["📝 Markdown", "📊 JSON"])
+    tabs = ["📝 Markdown", "📊 JSON"]
+    if graph_artifacts:
+        tabs.append("🔗 Graph")
 
-    with tab_md:
+    tab_objs = st.tabs(tabs)
+
+    with tab_objs[0]:
         if md_artifacts:
             options = [f"{a['name']} ({a['size'] // 1024}KB)" for a in md_artifacts]
             selected_idx = st.selectbox(
@@ -456,7 +461,7 @@ def render_artifact_viewer():
         else:
             st.info("No Markdown artifacts.")
 
-    with tab_json:
+    with tab_objs[1]:
         if json_artifacts:
             options_j = [f"{a['name']} ({a['size'] // 1024}KB)" for a in json_artifacts]
             selected_j_idx = st.selectbox(
@@ -472,6 +477,22 @@ def render_artifact_viewer():
                 st.json(content)
         else:
             st.info("No JSON artifacts.")
+
+    if graph_artifacts and len(tab_objs) > 2:
+        with tab_objs[2]:
+            options_g = [f"{a['name']} ({a['size'] // 1024}KB)" for a in graph_artifacts]
+            selected_g_idx = st.selectbox(
+                "Select graph",
+                range(len(options_g)),
+                format_func=lambda i: options_g[i],
+                key="graph_select",
+            )
+            if selected_g_idx is not None:
+                artifact = graph_artifacts[selected_g_idx]
+                st.caption(f"🔗 {artifact['name']} — {artifact['size'] // 1024}KB")
+                import streamlit.components.v1 as components
+                html_content = Path(artifact["path"]).read_text()
+                components.html(html_content, height=850, scrolling=True)
 
 
 # ------------------------------------------------------------------

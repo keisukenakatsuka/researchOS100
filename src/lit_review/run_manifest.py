@@ -56,6 +56,8 @@ SCRIPT_DEPS: Dict[str, List[str]] = {
     "098_literature_review_drafter": ["094"],
     "099_research_output_review": ["095", "096", "097"],
     "100_export_bundle": ["099"],
+    # Knowledge Graph (Exploration Layer)
+    "106_knowledge_graph": ["083"],
 }
 
 # Script output file expectations
@@ -78,6 +80,7 @@ SCRIPT_OUTPUTS: Dict[str, List[str]] = {
     "098_literature_review_drafter": ["draft_literature_review.md"],
     "099_research_output_review": ["review_report.json", "review_report.md"],
     "100_export_bundle": ["paper_draft.md", "export_bundle.json"],
+    "106_knowledge_graph": ["knowledge_graph.html", "evidence_chain.html", "graph_data.json"],
 }
 
 
@@ -215,6 +218,7 @@ SCRIPT_LABELS: Dict[str, str] = {
     "098_literature_review_drafter": "Literature Review",
     "099_research_output_review": "Output Review",
     "100_export_bundle": "Export Bundle",
+    "106_knowledge_graph": "Knowledge Graph",
 }
 
 SCRIPT_BLOCKS: Dict[str, str] = {
@@ -226,6 +230,7 @@ SCRIPT_BLOCKS: Dict[str, str] = {
     "093": "Block 6",
     "094": "Block 6", "095": "Block 6", "096": "Block 6", "097": "Block 6",
     "098": "Block 6", "099": "Block 6", "100": "Block 6",
+    "106": "Visualization",
 }
 
 

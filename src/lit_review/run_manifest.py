@@ -58,6 +58,11 @@ SCRIPT_DEPS: Dict[str, List[str]] = {
     "100_export_bundle": ["099"],
     # Knowledge Graph (Exploration Layer)
     "106_knowledge_graph": ["083"],
+    # Validation & Grounding (optional, post Block 5)
+    "110_literature_validator": ["081"],
+    "111_dataset_registry": ["081"],
+    "112_model_prototyper": ["087", "092"],
+    "113_data_strategy": ["111", "091"],
 }
 
 # Script output file expectations
@@ -81,6 +86,11 @@ SCRIPT_OUTPUTS: Dict[str, List[str]] = {
     "099_research_output_review": ["review_report.json", "review_report.md"],
     "100_export_bundle": ["paper_draft.md", "export_bundle.json"],
     "106_knowledge_graph": ["knowledge_graph.html", "evidence_chain.html", "graph_data.json"],
+    # Validation & Grounding
+    "110_literature_validator": ["validation_result.json", "validation_report.md"],
+    "111_dataset_registry": ["dataset_registry.json", "dataset_registry.md"],
+    "112_model_prototyper": ["model_blueprints.json", "model_blueprints.md"],
+    "113_data_strategy": ["data_strategy.json", "data_strategy.md"],
 }
 
 
@@ -165,7 +175,10 @@ def _update_derived_fields(manifest: Dict, run_dir: Path):
     blocked = []
 
     # Steps that are supplementary (not on critical path)
-    OPTIONAL_STEPS = {"080_literature_gap_filler", "085_cross_rq_comparison", "086_claim_canonicalization", "098_literature_review_drafter"}
+    OPTIONAL_STEPS = {
+        "080_literature_gap_filler", "085_cross_rq_comparison", "086_claim_canonicalization", "098_literature_review_drafter",
+        "110_literature_validator", "111_dataset_registry", "112_model_prototyper", "113_data_strategy",
+    }
 
     for script_id, deps in SCRIPT_DEPS.items():
         if script_id in [s for s in manifest.get("steps", {}) if manifest["steps"][s].get("status") == STATUS_COMPLETED]:
@@ -219,6 +232,11 @@ SCRIPT_LABELS: Dict[str, str] = {
     "099_research_output_review": "Output Review",
     "100_export_bundle": "Export Bundle",
     "106_knowledge_graph": "Knowledge Graph",
+    # Validation & Grounding
+    "110_literature_validator": "Lit Validator",
+    "111_dataset_registry": "Dataset Registry",
+    "112_model_prototyper": "Model Prototyper",
+    "113_data_strategy": "Data Strategy",
 }
 
 SCRIPT_BLOCKS: Dict[str, str] = {
@@ -231,6 +249,8 @@ SCRIPT_BLOCKS: Dict[str, str] = {
     "094": "Block 6", "095": "Block 6", "096": "Block 6", "097": "Block 6",
     "098": "Block 6", "099": "Block 6", "100": "Block 6",
     "106": "Visualization",
+    "110": "Validation & Grounding", "111": "Validation & Grounding",
+    "112": "Validation & Grounding", "113": "Validation & Grounding",
 }
 
 

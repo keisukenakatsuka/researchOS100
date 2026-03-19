@@ -84,6 +84,20 @@ PIPELINE_STEPS: List[StepConfig] = [
                "Method comparison & recommendation",
                phase="hypothesis"),
 
+    # Phase 2 (cont.): Validation & Grounding (optional)
+    StepConfig("110", "src.scripts.110_literature_validator",
+               "Literature validation (evidence grounding)",
+               phase="hypothesis", optional=True),
+    StepConfig("111", "src.scripts.111_dataset_registry",
+               "Dataset registry (availability assessment)",
+               phase="hypothesis", optional=True),
+    StepConfig("112", "src.scripts.112_model_prototyper",
+               "Model blueprints (baseline design)",
+               phase="hypothesis", optional=True),
+    StepConfig("113", "src.scripts.113_data_strategy",
+               "Data strategy roadmap",
+               phase="hypothesis", optional=True),
+
     # Phase 3: Research Output
     StepConfig("093", "src.scripts.093_research_plan_generator",
                "Research plan generation",

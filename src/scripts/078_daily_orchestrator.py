@@ -5,7 +5,11 @@
 Replaces notebook-based orchestration (036) with a script that has
 clear logging, execution order, and exit codes.
 
-Execution order: 074 → 076 → 075 → 077
+Execution order: 074 → 109 → 031 → 076 → 075 → 077
+
+031 mode: Drive enabled, slides disabled (--no-slides).
+  To enable slides, remove --no-slides from 031's extra_args or run
+  031 standalone: python -m src.scripts.031_pdf_inbox_processor --limit N
 
 Usage::
 
@@ -58,6 +62,17 @@ PIPELINE_STEPS: List[StepConfig] = [
         name="074",
         module="src.scripts.074_lit_inbox_processor",
         description="LIT Inbox: PDF download + relevance judgment",
+    ),
+    StepConfig(
+        name="109",
+        module="src.scripts.109_lit_enrichment",
+        description="LIT Enrichment: enrich paper fields (Core Idea, Methods, etc.)",
+    ),
+    StepConfig(
+        name="031",
+        module="src.scripts.031_pdf_inbox_processor",
+        description="PDF Inbox: process manual PDFs from data/downloads (Drive on, slides off)",
+        extra_args=["--no-slides"],
     ),
     StepConfig(
         name="076",

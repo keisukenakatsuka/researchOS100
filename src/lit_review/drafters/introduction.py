@@ -129,14 +129,26 @@ class IntroductionDrafter(BaseDrafter):
                 user_parts.append(f"- {finding_text[:300]}")
             user_parts.append("")
 
-        # Hypotheses (statements only, for contribution preview)
-        hypotheses = hyp.get("hypotheses", [])
-        if hypotheses:
-            user_parts.append(f"## Hypotheses ({len(hypotheses)}) — for contribution preview")
-            for i, h in enumerate(hypotheses):
-                stmt = h.get("hypothesis_statement", "")
-                user_parts.append(f"H{i+1}: {stmt}")
+        # Hypotheses — use focused when available
+        from src.lit_review.focus import is_focused
+        focused = ctx.input("focused_hypotheses.json")
+        if is_focused(focused):
+            user_parts.append("## Focused Hypotheses — for contribution preview")
+            primary = focused["primary"]
+            user_parts.append(f"H1 (PRIMARY): {primary.get('hypothesis_statement', '')}")
+            if focused.get("has_secondary") and focused.get("secondary"):
+                secondary = focused["secondary"]
+                user_parts.append(f"H2 (SECONDARY): {secondary.get('hypothesis_statement', '')}")
+            user_parts.append("NOTE: Introduction should frame contribution around H1 primarily.")
             user_parts.append("")
+        else:
+            hypotheses = hyp.get("hypotheses", [])
+            if hypotheses:
+                user_parts.append(f"## Hypotheses ({len(hypotheses)}) — for contribution preview")
+                for i, h in enumerate(hypotheses):
+                    stmt = h.get("hypothesis_statement", "")
+                    user_parts.append(f"H{i+1}: {stmt}")
+                user_parts.append("")
 
         # --- User prompt: Layer 3 (cross-references, compact) ---
         if ctx.cross_refs:

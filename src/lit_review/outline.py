@@ -40,6 +40,7 @@ _OPTIONAL = [
     "landscape.json",
     "assumptions.json",
     "hypothesis_portfolio.json",
+    "focused_hypotheses.json",
     "validation_designs.json",
     "data_requirements.json",
     "method_selection.json",
@@ -144,22 +145,38 @@ def _build_context(inputs: Dict[str, Any]) -> str:
         for q in oqs:
             parts.append(f"- {q.get('description', q.get('question', ''))[:200]}")
 
-    # Hypotheses (all, no truncation)
-    hypotheses = hyp.get("hypotheses", [])
-    parts.append(f"\n## Hypotheses ({len(hypotheses)})")
-    for i, h in enumerate(hypotheses):
-        stmt = h.get("hypothesis_statement", "")
-        strat = h.get("strategy", "")
-        rationale = h.get("rationale", "")[:300]
-        parts.append(f"\nH{i+1} [{strat}]: {stmt}\nRationale: {rationale}")
+    # Hypotheses — use focused (089c) when available
+    from src.lit_review.focus import is_focused
+    focused = inputs.get("focused_hypotheses.json", {})
+    if is_focused(focused):
+        parts.append(f"\n## Focused Hypotheses (from convergence layer)")
+        parts.append(f"NOTE: This paper should be structured around H1 (primary) and optionally H2 (secondary).")
+        primary = focused["primary"]
+        parts.append(f"\nH1 (PRIMARY) [{primary.get('strategy', '')}]: {primary.get('hypothesis_statement', '')}")
+        parts.append(f"Rationale: {primary.get('rationale', '')[:300]}")
+        secondary = focused.get("secondary")
+        if focused.get("has_secondary") and secondary:
+            parts.append(f"\nH2 (SECONDARY) [{secondary.get('strategy', '')}]: {secondary.get('hypothesis_statement', '')}")
+            parts.append(f"Rationale: {secondary.get('rationale', '')[:300]}")
+        notes = focused.get("notes_for_downstream", "")
+        if notes:
+            parts.append(f"\nNotes: {notes}")
+    else:
+        hypotheses = hyp.get("hypotheses", [])
+        parts.append(f"\n## Hypotheses ({len(hypotheses)})")
+        for i, h in enumerate(hypotheses):
+            stmt = h.get("hypothesis_statement", "")
+            strat = h.get("strategy", "")
+            rationale = h.get("rationale", "")[:300]
+            parts.append(f"\nH{i+1} [{strat}]: {stmt}\nRationale: {rationale}")
 
-    # Portfolio priority (if available)
-    if port:
-        scored = port.get("scored_hypotheses", [])
-        high = [s for s in scored if s.get("recommendation") == "high_priority"]
-        if high:
-            ids = [s.get("hypothesis_id", "") for s in high]
-            parts.append(f"\n## High Priority Hypotheses: {', '.join(ids)}")
+        # Portfolio priority (if available)
+        if port:
+            scored = port.get("scored_hypotheses", [])
+            high = [s for s in scored if s.get("recommendation") == "high_priority"]
+            if high:
+                ids = [s.get("hypothesis_id", "") for s in high]
+                parts.append(f"\n## High Priority Hypotheses: {', '.join(ids)}")
 
     # Assumptions summary
     if asmp:
@@ -247,7 +264,7 @@ def _generate_outline_json(
         f"以下の 4 セクションを必ず含めてください:\n"
         f"1. introduction — motivation → gap → contribution → paper structure\n"
         f"2. literature_review — theoretical streams → empirical findings → research gap\n"
-        f"3. hypotheses — 仮説の理論的根拠と正式な仮説文 (全仮説をカバー)\n"
+        f"3. hypotheses — H1 を中心に理論的根拠と正式な仮説文を展開。H2 がある場合は補助仮説として扱う\n"
         f"4. methods — research design → identification → data → variables → estimation\n\n"
         f"## 要件\n"
         f"- 各セクションの target_words の合計は 8,000–12,000 words\n"

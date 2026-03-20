@@ -278,6 +278,8 @@ def _assess_l2(
     sections: List[SectionReview],
     drafts: Dict[str, str],
     cross_checks: List[CrossSectionCheck],
+    *,
+    focused_mode: bool = False,
 ) -> List[L2Assessment]:
     """Assess L2 Working Draft readiness."""
     assessments: List[L2Assessment] = []
@@ -325,14 +327,38 @@ def _assess_l2(
         detail=hyp_methods.detail if hyp_methods else "Check not run",
     ))
 
-    # Completeness
+    # Completeness — mode-aware hypothesis coverage
     hyp_text = drafts.get("hypotheses", "")
     h_markers = sorted(set(re.findall(r"\bH\d+\b", hyp_text)))
+
+    if focused_mode:
+        # Focused: require at least H1, at most H2; also check theoretical depth
+        min_markers = 1
+        mode_label = "focused"
+    else:
+        # Legacy: require coverage of all hypotheses
+        min_markers = 9
+        mode_label = "legacy"
+
     assessments.append(L2Assessment(
         criterion="completeness",
-        passed=len(h_markers) >= 9,
-        detail=f"Hypothesis markers in draft: {len(h_markers)} ({h_markers})",
+        passed=len(h_markers) >= min_markers,
+        detail=f"[{mode_label}] Hypothesis markers in draft: {len(h_markers)} ({h_markers}), required: {min_markers}+",
     ))
+
+    # Hypothesis depth (focused mode only) — ensure theoretical grounding
+    # even with fewer hypotheses, the section should have substance
+    if focused_mode and hyp_text:
+        hyp_lower = hyp_text.lower()
+        depth_markers = ["理論", "theory", "先行研究", "既存研究", "theoretical",
+                         "限界", "limitation", "前提", "assumption"]
+        depth_count = sum(1 for m in depth_markers if m in hyp_lower)
+        has_bold = len(re.findall(r'\*\*[^*]{20,}\*\*', hyp_text)) >= 1
+        assessments.append(L2Assessment(
+            criterion="hypothesis_depth",
+            passed=depth_count >= 2 and has_bold,
+            detail=f"Theoretical grounding markers: {depth_count}, bold hypothesis statements: {has_bold}",
+        ))
 
     return assessments
 
@@ -488,8 +514,13 @@ def run_review(
             _check_logical_flow(drafts),
         ]
 
-        # 3. L2 assessment
-        result.l2_assessment = _assess_l2(result.sections, drafts, result.cross_section_checks)
+        # 3. L2 assessment — detect focused mode
+        from src.lit_review.focus import load_focused, is_focused
+        focused_mode = is_focused(load_focused(run_dir))
+        result.l2_assessment = _assess_l2(
+            result.sections, drafts, result.cross_section_checks,
+            focused_mode=focused_mode,
+        )
         result.l2_passed = all(a.passed for a in result.l2_assessment)
 
         # 4. LLM narrative review

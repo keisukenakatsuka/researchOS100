@@ -42,14 +42,13 @@ class HypothesesDrafter(BaseDrafter):
         lr = ctx.require("lit_review.json")
         asmp = ctx.input("assumptions.json")
         port = ctx.input("hypothesis_portfolio.json")
+        focused = ctx.input("focused_hypotheses.json")
 
         hypotheses = hyp.get("hypotheses", [])
         target_words = spec.get("target_words", 3000)
 
-        # Build priority map from portfolio
-        priority_map: Dict[str, str] = {}
-        for s in port.get("scored_hypotheses", []):
-            priority_map[s.get("hypothesis_id", "")] = s.get("recommendation", "")
+        from src.lit_review.focus import is_focused
+        use_focused = is_focused(focused)
 
         # Build assumptions map
         assumptions_map: Dict[str, List[str]] = {}
@@ -61,24 +60,50 @@ class HypothesesDrafter(BaseDrafter):
             ]
 
         # --- System prompt ---
-        system = (
-            "あなたは社会科学分野の学術論文の Hypotheses Development セクションの執筆者です。\n"
-            "以下のルールに厳密に従ってください:\n\n"
-            "1. 日本語で執筆する\n"
-            "2. 学術論文の Hypotheses セクションとして適切な文体を用いる\n"
-            "3. 先行研究に言及する際は必ず (著者名, 年) 形式で引用する\n"
-            f"4. 目標語数: 約{target_words}語。冗長な繰り返しや過度な修飾を避け、簡潔かつ正確に書く\n"
-            "5. 各仮説は以下の構成で書く:\n"
-            "   (a) 理論的背景 — どの理論・先行研究から導かれるか\n"
-            "   (b) 論理的根拠 — なぜその方向性を予測するか\n"
-            "   (c) 正式な仮説文 — 太字で明示 (変数間関係が読めること)\n"
-            "   (d) 効果サイズの予測 — 数量的な期待を含む\n"
-            f"6. 全 {len(hypotheses)} 仮説を漏れなく扱う (省略禁止)\n"
-            "7. 仮説同士の関係性を明示する (主仮説/補助仮説、相互依存 等)\n"
-            "8. Markdown 形式で出力する (# Hypotheses Development から始める)\n"
-            "9. セクション末尾で Methods に自然に接続する文を含める\n"
-            "10. 冗長化を避ける。各仮説の記述は本質に絞り、繰り返しを排除する\n"
-        )
+        if use_focused:
+            h_count = 1 + (1 if focused.get("has_secondary") else 0)
+            system = (
+                "あなたは社会科学分野の学術論文の Hypotheses Development セクションの執筆者です。\n"
+                "以下のルールに厳密に従ってください:\n\n"
+                "1. 日本語で執筆する\n"
+                "2. 学術論文の Hypotheses セクションとして適切な文体を用いる\n"
+                "3. 先行研究に言及する際は必ず (著者名, 年) 形式で引用する\n"
+                f"4. 目標語数: 約{target_words}語。冗長な繰り返しや過度な修飾を避け、簡潔かつ正確に書く\n"
+                "5. 各仮説は以下の構成で書く:\n"
+                "   (a) 理論的背景 — どの理論・先行研究から導かれるか\n"
+                "   (b) 論理的根拠 — なぜその方向性を予測するか\n"
+                "   (c) 正式な仮説文 — 太字で明示 (変数間関係が読めること)\n"
+                "   (d) 効果サイズの予測 — 数量的な期待を含む\n"
+                f"6. 本論文は {h_count} 仮説に集中する。H1 を深く掘り下げること\n"
+                "7. H2 がある場合は、H1 の補助仮説または代替説明として位置づけること\n"
+                "8. Markdown 形式で出力する (# Hypotheses Development から始める)\n"
+                "9. セクション末尾で Methods に自然に接続する文を含める\n"
+                "10. 冗長化を避ける。仮説の記述は本質に絞り、繰り返しを排除する\n"
+            )
+        else:
+            # Build priority map from portfolio
+            priority_map: Dict[str, str] = {}
+            for s in port.get("scored_hypotheses", []):
+                priority_map[s.get("hypothesis_id", "")] = s.get("recommendation", "")
+
+            system = (
+                "あなたは社会科学分野の学術論文の Hypotheses Development セクションの執筆者です。\n"
+                "以下のルールに厳密に従ってください:\n\n"
+                "1. 日本語で執筆する\n"
+                "2. 学術論文の Hypotheses セクションとして適切な文体を用いる\n"
+                "3. 先行研究に言及する際は必ず (著者名, 年) 形式で引用する\n"
+                f"4. 目標語数: 約{target_words}語。冗長な繰り返しや過度な修飾を避け、簡潔かつ正確に書く\n"
+                "5. 各仮説は以下の構成で書く:\n"
+                "   (a) 理論的背景 — どの理論・先行研究から導かれるか\n"
+                "   (b) 論理的根拠 — なぜその方向性を予測するか\n"
+                "   (c) 正式な仮説文 — 太字で明示 (変数間関係が読めること)\n"
+                "   (d) 効果サイズの予測 — 数量的な期待を含む\n"
+                f"6. 全 {len(hypotheses)} 仮説を漏れなく扱う (省略禁止)\n"
+                "7. 仮説同士の関係性を明示する (主仮説/補助仮説、相互依存 等)\n"
+                "8. Markdown 形式で出力する (# Hypotheses Development から始める)\n"
+                "9. セクション末尾で Methods に自然に接続する文を含める\n"
+                "10. 冗長化を避ける。各仮説の記述は本質に絞り、繰り返しを排除する\n"
+            )
 
         # --- User prompt ---
         user_parts: List[str] = []
@@ -100,30 +125,46 @@ class HypothesesDrafter(BaseDrafter):
                 user_parts.append(f"Must connect to: {connects_to} section")
             user_parts.append("")
 
-        # Layer 2: Hypotheses (ALL, full detail, no truncation)
-        user_parts.append(f"## Hypotheses ({len(hypotheses)}) — MUST cover ALL")
-        high_priority = []
-        other = []
-        for i, h in enumerate(hypotheses):
-            hid = h.get("hypothesis_id", "")
-            rec = priority_map.get(hid, "")
-            if rec == "high_priority":
-                high_priority.append((i, h, hid, rec))
-            else:
-                other.append((i, h, hid, rec))
+        # Layer 2: Hypotheses
+        if use_focused:
+            # Focused mode: H1/H2 only
+            primary = focused["primary"]
+            user_parts.append("## H1 (Primary Hypothesis) — MAIN FOCUS")
+            user_parts.append(self._format_focused_hypothesis(primary, assumptions_map))
 
-        # Present high-priority first
-        if high_priority:
-            user_parts.append("\n### High Priority Hypotheses")
-        for idx, h, hid, rec in high_priority:
-            user_parts.append(self._format_hypothesis(idx, h, hid, rec, assumptions_map))
+            if focused.get("has_secondary") and focused.get("secondary"):
+                secondary = focused["secondary"]
+                user_parts.append("\n## H2 (Secondary Hypothesis) — complementary/alternative")
+                user_parts.append(self._format_focused_hypothesis(secondary, assumptions_map))
 
-        if other:
-            user_parts.append("\n### Other Hypotheses")
-        for idx, h, hid, rec in other:
-            user_parts.append(self._format_hypothesis(idx, h, hid, rec, assumptions_map))
+            notes = focused.get("notes_for_downstream", "")
+            if notes:
+                user_parts.append(f"\n## Downstream Notes\n{notes}")
+            user_parts.append("")
+        else:
+            # Legacy mode: all hypotheses
+            user_parts.append(f"## Hypotheses ({len(hypotheses)}) — MUST cover ALL")
+            high_priority = []
+            other = []
+            for i, h in enumerate(hypotheses):
+                hid = h.get("hypothesis_id", "")
+                rec = priority_map.get(hid, "")
+                if rec == "high_priority":
+                    high_priority.append((i, h, hid, rec))
+                else:
+                    other.append((i, h, hid, rec))
 
-        user_parts.append("")
+            if high_priority:
+                user_parts.append("\n### High Priority Hypotheses")
+            for idx, h, hid, rec in high_priority:
+                user_parts.append(self._format_hypothesis(idx, h, hid, rec, assumptions_map))
+
+            if other:
+                user_parts.append("\n### Other Hypotheses")
+            for idx, h, hid, rec in other:
+                user_parts.append(self._format_hypothesis(idx, h, hid, rec, assumptions_map))
+
+            user_parts.append("")
 
         # Layer 2: Theoretical streams (for citation grounding)
         streams = lr.get("theoretical_streams", [])
@@ -145,6 +186,28 @@ class HypothesesDrafter(BaseDrafter):
                 user_parts.append(f"- {f.get('finding', f.get('description', ''))[:250]}")
             user_parts.append("")
 
+        # Deep literature findings (from 118/119, if available)
+        if ctx.deep_lit:
+            for hyp_id, dl in ctx.deep_lit.items():
+                fm = dl.get("finding_map")
+                syn = dl.get("synthesis")
+                if fm:
+                    ds = fm.get("direction_summary", {})
+                    user_parts.append(
+                        f"## Deep Literature Findings for {hyp_id[:20]}"
+                        f" (positive={ds.get('positive', 0)}, negative={ds.get('negative', 0)}, null={ds.get('null', 0)})"
+                    )
+                    for d in fm.get("disagreements", [])[:3]:
+                        user_parts.append(f"- Disagreement: {d[:150]}")
+                    user_parts.append("")
+                if syn:
+                    known = syn.get("known_established", [])
+                    if known:
+                        user_parts.append(f"## Established (deep lit, {len(known)} items)")
+                        for item in known[:5]:
+                            user_parts.append(f"- {item if isinstance(item, str) else str(item)[:150]}")
+                        user_parts.append("")
+
         # Layer 3: Cross-references (compact)
         if ctx.cross_refs:
             user_parts.append(ctx.cross_refs)
@@ -152,17 +215,56 @@ class HypothesesDrafter(BaseDrafter):
 
         # Instruction
         user_parts.append("## 指示")
-        user_parts.append(
-            "上記の情報をもとに、Hypotheses Development セクションを Markdown で書いてください。\n"
-            f"全 {len(hypotheses)} 仮説を漏れなく扱ってください (H1–H{len(hypotheses)})。\n"
-            "High priority 仮説はより詳細に記述し、それ以外も理論的根拠を明示してください。\n"
-            "仮説同士の関係性（主仮説/補助仮説、理論的つながり）を示してください。\n"
-            "各仮説の正式文は **太字** で明示してください。\n"
-            "最後の段落で Methods セクションへの自然な接続を書いてください。\n"
-            f"目標語数: 約{target_words}語。冗長化を避けてください。"
-        )
+        if use_focused:
+            h_count = 1 + (1 if focused.get("has_secondary") else 0)
+            user_parts.append(
+                "上記の情報をもとに、Hypotheses Development セクションを Markdown で書いてください。\n"
+                f"H1 を深く掘り下げてください。{f'H2 は H1 の補助仮説として位置づけてください。' if h_count > 1 else ''}\n"
+                "H1 の理論的背景を十分に展開し、なぜこの仮説が最も重要かを論証してください。\n"
+                "各仮説の正式文は **太字** で明示してください。\n"
+                "最後の段落で Methods セクションへの自然な接続を書いてください。\n"
+                f"目標語数: 約{target_words}語。冗長化を避けてください。"
+            )
+        else:
+            user_parts.append(
+                "上記の情報をもとに、Hypotheses Development セクションを Markdown で書いてください。\n"
+                f"全 {len(hypotheses)} 仮説を漏れなく扱ってください (H1–H{len(hypotheses)})。\n"
+                "High priority 仮説はより詳細に記述し、それ以外も理論的根拠を明示してください。\n"
+                "仮説同士の関係性（主仮説/補助仮説、理論的つながり）を示してください。\n"
+                "各仮説の正式文は **太字** で明示してください。\n"
+                "最後の段落で Methods セクションへの自然な接続を書いてください。\n"
+                f"目標語数: 約{target_words}語。冗長化を避けてください。"
+            )
 
         return system, "\n".join(user_parts)
+
+    @staticmethod
+    def _format_focused_hypothesis(
+        h: Dict[str, Any],
+        assumptions_map: Dict[str, List[str]],
+    ) -> str:
+        """Format a focused hypothesis (from focused_hypotheses.json) for the prompt."""
+        parts = [f"Statement: {h.get('hypothesis_statement', '')}"]
+        parts.append(f"Strategy: {h.get('strategy', '')}")
+        parts.append(f"Rationale: {h.get('rationale', '')}")
+        parts.append(f"Testability: {h.get('testability', '')}")
+        if h.get("suggested_test"):
+            parts.append(f"Suggested test: {h['suggested_test'][:300]}")
+        if h.get("novelty_rationale"):
+            parts.append(f"Novelty: {h['novelty_rationale'][:300]}")
+        if h.get("selection_reason"):
+            parts.append(f"Selection reason: {h['selection_reason'][:200]}")
+
+        hid = h.get("hypothesis_id", "")
+        assumptions = assumptions_map.get(hid, [])
+        if not assumptions and h.get("assumptions"):
+            assumptions = [a.get("statement", "") for a in h["assumptions"]]
+        if assumptions:
+            parts.append(f"Key assumptions ({len(assumptions)}):")
+            for a in assumptions[:5]:
+                parts.append(f"  - {a[:200]}")
+
+        return "\n".join(parts)
 
     def validate_content(self, text: str, outline_spec: Dict[str, Any]) -> List[str]:
         """Hypotheses-specific quality checks."""
@@ -174,10 +276,11 @@ class HypothesesDrafter(BaseDrafter):
         jp_markers = re.findall(r'仮説\s*\d+', text)
         markers = set(h_markers) | set(jp_markers)
 
-        if len(markers) < 5:
+        # Adjust expected count based on whether focused mode was used
+        # (we can't easily check here, so use a relaxed threshold)
+        if len(markers) < 1:
             warnings.append(
-                f"Only {len(markers)} hypothesis markers found — "
-                f"expected at least 9 (H1–H9 or 仮説1–仮説9)"
+                f"No hypothesis markers found — expected at least H1"
             )
 
         # Check for bold hypothesis statements

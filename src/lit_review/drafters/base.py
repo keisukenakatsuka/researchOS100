@@ -66,6 +66,7 @@ INPUT_FILES = [
     "hypotheses.json",
     "assumptions.json",
     "hypothesis_portfolio.json",
+    "focused_hypotheses.json",
     "validation_designs.json",
     "data_requirements.json",
     "method_selection.json",
@@ -123,6 +124,7 @@ class PromptContext:
     inputs: Dict[str, Any]                 # raw JSON inputs keyed by filename
     cross_refs: str                        # compact cross-reference text
     available: Dict[str, bool]             # filename -> exists?
+    deep_lit: Dict[str, Any] = field(default_factory=dict)  # hypothesis_id → deep_lit outputs
 
     def input(self, filename: str) -> Dict[str, Any]:
         """Get a raw input by filename, empty dict if missing."""
@@ -304,6 +306,24 @@ class BaseDrafter:
         # Cross-references from other drafts
         cross_refs = self._load_cross_references(run_dir)
 
+        # Deep literature outputs (per hypothesis, optional)
+        deep_lit: Dict[str, Any] = {}
+        try:
+            from src.lit_review.deep_lit import load_deep_lit_outputs
+            from src.lit_review.focus import load_focused, is_focused
+            focused = load_focused(run_dir)
+            if is_focused(focused):
+                for role in ["primary", "secondary"]:
+                    hyp = focused.get(role)
+                    if hyp and (role == "primary" or focused.get("has_secondary")):
+                        hyp_id = hyp.get("hypothesis_id", "")
+                        if hyp_id:
+                            dl = load_deep_lit_outputs(run_dir, hyp_id)
+                            if dl:
+                                deep_lit[hyp_id] = dl
+        except Exception as e:
+            logger.debug("Deep lit loading skipped: %s", e)
+
         return PromptContext(
             run_dir=run_dir,
             outline=outline,
@@ -311,6 +331,7 @@ class BaseDrafter:
             inputs=inputs,
             cross_refs=cross_refs,
             available=available,
+            deep_lit=deep_lit,
         )
 
     def _extract_section_spec(self, outline: Dict[str, Any]) -> Dict[str, Any]:

@@ -181,13 +181,47 @@ class LiteratureReviewDrafter(BaseDrafter):
                     user_parts.append(f"Quantitative: {methods_str}")
                     user_parts.append("")
 
-        # Layer 2f: Hypotheses (compact — for showing what gaps this study addresses)
-        hypotheses = hyp.get("hypotheses", [])
-        if hypotheses:
-            user_parts.append(f"## This Study's Hypotheses ({len(hypotheses)}) — for gap-to-contribution mapping")
-            for i, h in enumerate(hypotheses):
-                user_parts.append(f"H{i + 1}: {h.get('hypothesis_statement', '')[:120]}")
+        # Layer 2f: Hypotheses — use focused when available
+        from src.lit_review.focus import is_focused
+        focused = ctx.input("focused_hypotheses.json")
+        if is_focused(focused):
+            user_parts.append("## This Study's Hypotheses (focused) — for gap-to-contribution mapping")
+            primary = focused["primary"]
+            user_parts.append(f"H1 (PRIMARY): {primary.get('hypothesis_statement', '')}")
+            if focused.get("has_secondary") and focused.get("secondary"):
+                secondary = focused["secondary"]
+                user_parts.append(f"H2 (SECONDARY): {secondary.get('hypothesis_statement', '')}")
+            user_parts.append("NOTE: Literature review should organize around themes relevant to H1/H2.")
             user_parts.append("")
+        else:
+            hypotheses = hyp.get("hypotheses", [])
+            if hypotheses:
+                user_parts.append(f"## This Study's Hypotheses ({len(hypotheses)}) — for gap-to-contribution mapping")
+                for i, h in enumerate(hypotheses):
+                    user_parts.append(f"H{i + 1}: {h.get('hypothesis_statement', '')[:120]}")
+                user_parts.append("")
+
+        # Deep literature clusters + synthesis (from 117/119, if available)
+        if ctx.deep_lit:
+            for hyp_id, dl in ctx.deep_lit.items():
+                cl = dl.get("clusters")
+                syn = dl.get("synthesis")
+                if cl and cl.get("clusters"):
+                    user_parts.append(f"## Literature Clusters (deep lit, {cl.get('n_clusters', 0)} clusters)")
+                    for c in cl["clusters"]:
+                        user_parts.append(
+                            f"- **{c.get('cluster_name', '')}** ({c.get('paper_count', 0)} papers): "
+                            f"{c.get('description', '')[:120]}"
+                        )
+                    user_parts.append("NOTE: Organize the review around these clusters when possible.")
+                    user_parts.append("")
+                if syn:
+                    gaps = syn.get("unknown_gaps", [])
+                    if gaps:
+                        user_parts.append(f"## Unknown Gaps (deep lit)")
+                        for g in gaps[:5]:
+                            user_parts.append(f"- {g if isinstance(g, str) else str(g)[:150]}")
+                        user_parts.append("")
 
         # Layer 3: Cross-references (compact)
         if ctx.cross_refs:

@@ -108,6 +108,7 @@ def collect_inputs(run_dir: Path) -> Dict[str, Any]:
         "hypothesis_assumptions": [],
         "methods": [],
         "rq_title": "",
+        "focused": None,
     }
 
     rq_path = run_dir / "rq_context.json"
@@ -126,6 +127,10 @@ def collect_inputs(run_dir: Path) -> Dict[str, Any]:
     if asmp_path.exists():
         inputs["hypothesis_assumptions"] = json.loads(asmp_path.read_text()).get("hypothesis_assumptions", [])
 
+    # Load focused hypotheses (089c) if available
+    from src.lit_review.focus import load_focused
+    inputs["focused"] = load_focused(run_dir)
+
     ls_path = run_dir / "landscape.json"
     if ls_path.exists():
         ls = json.loads(ls_path.read_text())
@@ -141,12 +146,56 @@ def collect_inputs(run_dir: Path) -> Dict[str, Any]:
     return inputs
 
 
+def _select_from_focused(focused: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Select target hypotheses from focused_hypotheses.json (089c output)."""
+    targets = []
+    primary = focused.get("primary")
+    if primary:
+        targets.append({
+            "hypothesis_id": primary.get("hypothesis_id", ""),
+            "hypothesis_statement": primary.get("hypothesis_statement", ""),
+            "strategy": primary.get("strategy", ""),
+            "suggested_test": primary.get("suggested_test", ""),
+            "recommendation": primary.get("portfolio_recommendation", "high_priority"),
+            "scores": primary.get("portfolio_scores", {}),
+            "overall_vulnerability": primary.get("overall_vulnerability", ""),
+            "assumptions": primary.get("assumptions", []),
+            "weakest_assumption": "",
+        })
+    secondary = focused.get("secondary")
+    if focused.get("has_secondary") and secondary:
+        targets.append({
+            "hypothesis_id": secondary.get("hypothesis_id", ""),
+            "hypothesis_statement": secondary.get("hypothesis_statement", ""),
+            "strategy": secondary.get("strategy", ""),
+            "suggested_test": secondary.get("suggested_test", ""),
+            "recommendation": secondary.get("portfolio_recommendation", "promising"),
+            "scores": secondary.get("portfolio_scores", {}),
+            "overall_vulnerability": secondary.get("overall_vulnerability", ""),
+            "assumptions": secondary.get("assumptions", []),
+            "weakest_assumption": "",
+        })
+    logger.info("Selected %d target hypotheses from focused_hypotheses.json", len(targets))
+    return targets
+
+
 def select_target_hypotheses(
     inputs: Dict[str, Any],
     *,
     max_designs: int = 5,
 ) -> List[Dict[str, Any]]:
-    """Select hypotheses for validation design based on portfolio recommendation."""
+    """Select hypotheses for validation design.
+
+    When focused_hypotheses.json exists (089c output), uses H1/H2 only.
+    Otherwise falls back to portfolio-based selection (high_priority + promising).
+    """
+    # Focused path: use H1/H2 from convergence layer
+    from src.lit_review.focus import is_focused
+    focused = inputs.get("focused")
+    if is_focused(focused):
+        return _select_from_focused(focused)
+
+    # Fallback: portfolio-based selection
     portfolio = inputs.get("portfolio", [])
     hypotheses = inputs.get("hypotheses", [])
     assumptions = inputs.get("hypothesis_assumptions", [])

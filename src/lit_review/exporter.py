@@ -156,6 +156,22 @@ def _build_metadata(
         review = json.loads(review_path.read_text())
         quality_score = review.get("overall_quality_score", 0.0)
 
+    # Focused hypotheses info
+    focused_info: Dict[str, Any] = {}
+    focused_path = run_dir / "focused_hypotheses.json"
+    if focused_path.exists():
+        focused = json.loads(focused_path.read_text())
+        primary = focused.get("primary", {})
+        secondary = focused.get("secondary", {})
+        focused_info = {
+            "has_focused": True,
+            "primary_id": primary.get("hypothesis_id", ""),
+            "primary_statement": primary.get("hypothesis_statement", "")[:100],
+            "has_secondary": focused.get("has_secondary", False),
+            "secondary_id": secondary.get("hypothesis_id", "") if secondary else "",
+            "review_source": focused.get("review_source", ""),
+        }
+
     return {
         "run_id": run_dir.name,
         "rq_title": rq_title,
@@ -167,6 +183,7 @@ def _build_metadata(
         "total_word_count": total_words,
         "citation_count": citation_count,
         "quality_score": quality_score,
+        "focused_hypotheses": focused_info,
         "files": [
             "paper_draft.md",
             "paper_outline.json",

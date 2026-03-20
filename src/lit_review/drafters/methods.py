@@ -102,10 +102,21 @@ class MethodsDrafter(BaseDrafter):
                 user_parts.append(f"Key references to cite: {', '.join(refs)}")
             user_parts.append("")
 
-        # Layer 2a: Hypotheses (compact — full detail is in 096, here just for mapping)
-        user_parts.append(f"## Hypotheses to verify ({len(hypotheses)})")
-        for i, h in enumerate(hypotheses):
-            user_parts.append(f"H{i + 1}: {h.get('hypothesis_statement', '')}")
+        # Layer 2a: Hypotheses — use focused when available
+        from src.lit_review.focus import is_focused
+        focused = ctx.input("focused_hypotheses.json")
+        if is_focused(focused):
+            user_parts.append("## Hypotheses to verify (focused)")
+            primary = focused["primary"]
+            user_parts.append(f"H1 (PRIMARY): {primary.get('hypothesis_statement', '')}")
+            if focused.get("has_secondary") and focused.get("secondary"):
+                secondary = focused["secondary"]
+                user_parts.append(f"H2 (SECONDARY): {secondary.get('hypothesis_statement', '')}")
+            user_parts.append("NOTE: Methods section should cover H1/H2 only.")
+        else:
+            user_parts.append(f"## Hypotheses to verify ({len(hypotheses)})")
+            for i, h in enumerate(hypotheses):
+                user_parts.append(f"H{i + 1}: {h.get('hypothesis_statement', '')}")
         user_parts.append("")
 
         # Layer 2b: Validation designs (ALL, full detail)
@@ -167,6 +178,25 @@ class MethodsDrafter(BaseDrafter):
                 user_parts.append(f"Critical gaps: {', '.join(str(g)[:100] for g in gaps[:3])}")
         user_parts.append(f"\nTotal variables: {total_vars}")
         user_parts.append("")
+
+        # Deep literature methods/variables (from 118, if available)
+        if ctx.deep_lit:
+            for hyp_id, dl in ctx.deep_lit.items():
+                mm = dl.get("method_map")
+                vm = dl.get("variable_map")
+                if mm and mm.get("methods"):
+                    user_parts.append(f"## Field Methods (deep lit, {hyp_id[:20]})")
+                    for m in mm["methods"][:6]:
+                        user_parts.append(f"- {m.get('name', '')} ({m.get('paper_count', 0)} papers)")
+                    user_parts.append("")
+                if vm and vm.get("variables"):
+                    user_parts.append(f"## Field Variables (deep lit)")
+                    for vt in ["dependent", "independent"]:
+                        vars_list = vm["variables"].get(vt, [])
+                        if vars_list:
+                            top = [v.get("name", "") for v in vars_list[:4]]
+                            user_parts.append(f"- {vt}: {', '.join(top)}")
+                    user_parts.append("")
 
         # Layer 3: Cross-references (compact)
         if ctx.cross_refs:

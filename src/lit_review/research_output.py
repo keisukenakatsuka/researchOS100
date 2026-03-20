@@ -38,6 +38,7 @@ INPUT_FILES = [
     "hypotheses.json",
     "assumptions.json",
     "hypothesis_portfolio.json",
+    "focused_hypotheses.json",
     "validation_designs.json",
     "data_requirements.json",
     "method_selection.json",
@@ -65,6 +66,33 @@ def collect_all_inputs(run_dir: Path) -> Dict[str, Any]:
     dr = inputs["raw"].get("data_requirements.json", {})
     ms = inputs["raw"].get("method_selection.json", {})
 
+    # Use focused hypotheses when available (089c), fallback to all
+    from src.lit_review.focus import is_focused
+    focused = inputs["raw"].get("focused_hypotheses.json", {})
+    if is_focused(focused):
+        focused_hyps = []
+        for role, key in [("primary", focused.get("primary")), ("secondary", focused.get("secondary"))]:
+            if key:
+                focused_hyps.append({
+                    "statement": key.get("hypothesis_statement", ""),
+                    "strategy": key.get("strategy", ""),
+                    "testability": key.get("testability", ""),
+                    "role": role,
+                })
+        summary_hypotheses = focused_hyps
+        high_priority_ids = [focused["primary"].get("hypothesis_id", "")]
+    else:
+        summary_hypotheses = [
+            {"statement": h.get("hypothesis_statement", ""), "strategy": h.get("strategy", ""),
+             "testability": h.get("testability", "")}
+            for h in hyp.get("hypotheses", [])
+        ]
+        high_priority_ids = [
+            s.get("hypothesis_id", "")
+            for s in port.get("scored_hypotheses", [])
+            if s.get("recommendation") == "high_priority"
+        ]
+
     inputs["summary"] = {
         "rq_title": rq.get("title", ""),
         "rq_background": rq.get("background", ""),
@@ -75,16 +103,8 @@ def collect_all_inputs(run_dir: Path) -> Dict[str, Any]:
         "emerging_count": len(lr.get("empirical_findings", {}).get("emerging", [])),
         "contested_count": len(lr.get("empirical_findings", {}).get("contested", [])),
         "open_questions": [q.get("description", "") for q in lr.get("open_questions", [])],
-        "hypotheses": [
-            {"statement": h.get("hypothesis_statement", ""), "strategy": h.get("strategy", ""),
-             "testability": h.get("testability", "")}
-            for h in hyp.get("hypotheses", [])
-        ],
-        "high_priority_hypotheses": [
-            s.get("hypothesis_id", "")
-            for s in port.get("scored_hypotheses", [])
-            if s.get("recommendation") == "high_priority"
-        ],
+        "hypotheses": summary_hypotheses,
+        "high_priority_hypotheses": high_priority_ids,
         "validation_designs_count": len(vd.get("validation_designs", [])),
         "primary_methods": [
             s.get("primary_method", "")
@@ -94,6 +114,7 @@ def collect_all_inputs(run_dir: Path) -> Dict[str, Any]:
             len(p.get("variables", []))
             for p in dr.get("data_plans", [])
         ),
+        "has_focused_hypotheses": bool(focused and focused.get("primary")),
     }
 
     missing = [f for f, avail in inputs["available"].items() if not avail]

@@ -104,6 +104,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-score", type=int, default=65, help="079 min relevance score (default: 65)")
     p.add_argument("--max-papers", type=int, default=20, help="079 max papers (default: 20)")
 
+    # Timeout
+    p.add_argument("--step-timeout", type=int, default=2400,
+                    help="Per-step timeout in seconds (default: 2400)")
+
     # General
     p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
 
@@ -224,6 +228,7 @@ def main() -> None:
         min_score=args.min_score,
         max_papers=args.max_papers,
         continue_on_error=args.continue_on_error,
+        step_timeout=args.step_timeout,
     )
 
     # Summary

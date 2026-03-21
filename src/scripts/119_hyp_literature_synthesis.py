@@ -109,11 +109,11 @@ def main():
         finding_map = json.loads(finding_map_path.read_text())
 
         synthesis = synthesize_literature(
-            clusters=clusters_data,
-            variable_map=variable_map,
-            method_map=method_map,
-            finding_map=finding_map,
-            hypothesis=h,
+            h,
+            clusters_data,
+            variable_map,
+            method_map,
+            finding_map,
             llm_client=llm_client,
         )
 
@@ -124,7 +124,7 @@ def main():
         all_outputs.append(f"hyp_literature/{hid}/hyp_literature_synthesis.json")
 
         # Render and save Markdown
-        md_content = render_synthesis_md(synthesis, hypothesis=h)
+        md_content = render_synthesis_md(synthesis)
         md_path = h_dir / "hyp_literature_synthesis.md"
         md_path.write_text(md_content)
         logger.info("Saved %s", md_path.name)

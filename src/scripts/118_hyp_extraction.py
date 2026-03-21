@@ -114,9 +114,9 @@ def main():
         clusters_data = json.loads(clusters_path.read_text())
 
         result = extract_and_map(
-            papers=ranked_data,
-            clusters=clusters_data,
-            hypothesis=h,
+            ranked_data,
+            clusters_data,
+            h,
             llm_client=llm_client,
         )
 

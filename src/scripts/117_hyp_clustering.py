@@ -103,7 +103,7 @@ def main():
         ranked_data = json.loads(ranked_path.read_text())
 
         clusters = cluster_papers(
-            papers=ranked_data,
+            ranked_data,
             llm_client=llm_client,
             max_clusters=args.max_clusters,
         )

@@ -106,8 +106,8 @@ def main():
         raw_papers = json.loads(raw_path.read_text())
 
         ranked = dedup_rank_select(
-            raw_papers=raw_papers,
-            hypothesis=h,
+            raw_papers,
+            h,
             llm_client=llm_client,
             min_papers=args.min_papers,
             max_papers=args.max_papers,

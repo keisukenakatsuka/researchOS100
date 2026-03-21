@@ -97,7 +97,8 @@ def main():
         queries_data = json.loads(queries_path.read_text())
 
         raw_papers = retrieve_papers(
-            queries=queries_data,
+            queries=queries_data.get("queries", []),
+            hypothesis_id=hid,
             max_per_query=args.max_per_query,
         )
 

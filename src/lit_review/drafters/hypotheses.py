@@ -191,21 +191,60 @@ class HypothesesDrafter(BaseDrafter):
             for hyp_id, dl in ctx.deep_lit.items():
                 fm = dl.get("finding_map")
                 syn = dl.get("synthesis")
+                label = hyp_id[:20]
+
                 if fm:
-                    ds = fm.get("direction_summary", {})
-                    user_parts.append(
-                        f"## Deep Literature Findings for {hyp_id[:20]}"
-                        f" (positive={ds.get('positive', 0)}, negative={ds.get('negative', 0)}, null={ds.get('null', 0)})"
-                    )
-                    for d in fm.get("disagreements", [])[:3]:
-                        user_parts.append(f"- Disagreement: {d[:150]}")
-                    user_parts.append("")
+                    # Consensus findings — use as empirical grounding for hypothesis
+                    consensus = fm.get("consensus_findings", [])
+                    if consensus:
+                        user_parts.append(f"## Consensus Findings for {label} — cite these to ground the hypothesis")
+                        for c in consensus:
+                            strength = c.get("strength", "")
+                            direction = c.get("direction", "")
+                            count = c.get("paper_count", 0)
+                            claim = c.get("claim", "")[:200]
+                            user_parts.append(f"- [{strength}, {direction}, {count} papers] {claim}")
+                        user_parts.append("")
+
+                    # Contested findings — acknowledge as limitations or competing explanations
+                    contested = fm.get("contested_findings", [])
+                    if contested:
+                        user_parts.append(f"## Contested Findings for {label} — acknowledge in hypothesis development")
+                        for ct in contested[:8]:
+                            topic = ct.get("topic", "")[:150]
+                            positions = ct.get("positions", [])
+                            if positions:
+                                pos_parts = []
+                                for p in positions:
+                                    pos_parts.append(f"{p.get('claim', '')[:80]} ({p.get('paper_count', 0)} papers)")
+                                user_parts.append(f"- {topic}: {' vs '.join(pos_parts)}")
+                            else:
+                                user_parts.append(f"- {topic}")
+                        user_parts.append("")
+
                 if syn:
+                    # Established knowledge from synthesis
                     known = syn.get("known_established", [])
                     if known:
-                        user_parts.append(f"## Established (deep lit, {len(known)} items)")
+                        user_parts.append(f"## Established Knowledge (synthesis) — use for theoretical grounding")
                         for item in known[:5]:
-                            user_parts.append(f"- {item if isinstance(item, str) else str(item)[:150]}")
+                            if isinstance(item, dict):
+                                finding = item.get("finding", "")
+                                support = item.get("support", item.get("evidence", ""))
+                                user_parts.append(f"- {finding} ({support})")
+                            else:
+                                user_parts.append(f"- {str(item)[:200]}")
+                        user_parts.append("")
+
+                    # Gaps from synthesis — what the hypothesis needs to address
+                    gaps = syn.get("unknown_gaps", [])
+                    if gaps:
+                        user_parts.append(f"## Gaps (synthesis) — hypothesis should address these")
+                        for g in gaps[:5]:
+                            if isinstance(g, dict):
+                                user_parts.append(f"- {g.get('gap', '')}: {g.get('description', g.get('importance', ''))[:150]}")
+                            else:
+                                user_parts.append(f"- {str(g)[:200]}")
                         user_parts.append("")
 
         # Layer 3: Cross-references (compact)

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _MODEL = "claude-sonnet-4-20250514"
 
 # Batch sizes
-SCORING_BATCH_SIZE = 10
+SCORING_BATCH_SIZE = 25
 EXTRACTION_BATCH_SIZE = 10
 
 # Retrieval defaults

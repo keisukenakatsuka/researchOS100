@@ -205,7 +205,9 @@ class LiteratureReviewDrafter(BaseDrafter):
         if ctx.deep_lit:
             for hyp_id, dl in ctx.deep_lit.items():
                 cl = dl.get("clusters")
+                fm = dl.get("finding_map")
                 syn = dl.get("synthesis")
+
                 if cl and cl.get("clusters"):
                     user_parts.append(f"## Literature Clusters (deep lit, {cl.get('n_clusters', 0)} clusters)")
                     for c in cl["clusters"]:
@@ -215,12 +217,71 @@ class LiteratureReviewDrafter(BaseDrafter):
                         )
                     user_parts.append("NOTE: Organize the review around these clusters when possible.")
                     user_parts.append("")
+
+                if fm:
+                    # Consensus findings → write as "established knowledge" in the review
+                    consensus = fm.get("consensus_findings", [])
+                    if consensus:
+                        user_parts.append(f"## Consensus Findings (deep lit) — integrate into '確立された知見' section")
+                        for c in consensus:
+                            strength = c.get("strength", "")
+                            direction = c.get("direction", "")
+                            count = c.get("paper_count", 0)
+                            claim = c.get("claim", "")[:200]
+                            user_parts.append(f"- [{strength}, {direction}, {count} papers] {claim}")
+                        user_parts.append("")
+
+                    # Contested findings → write as "対立する知見" section
+                    contested = fm.get("contested_findings", [])
+                    if contested:
+                        user_parts.append(f"## Contested Findings (deep lit) — write as '対立する知見' with both positions")
+                        for ct in contested[:10]:
+                            topic = ct.get("topic", "")[:150]
+                            positions = ct.get("positions", [])
+                            if positions:
+                                pos_parts = []
+                                for p in positions:
+                                    pos_parts.append(f"{p.get('claim', '')[:80]} ({p.get('paper_count', 0)} papers)")
+                                user_parts.append(f"- {topic}: {' vs '.join(pos_parts)}")
+                            else:
+                                user_parts.append(f"- {topic}")
+                        user_parts.append("")
+
                 if syn:
+                    # Established from synthesis
+                    known_est = syn.get("known_established", [])
+                    if known_est:
+                        user_parts.append(f"## Established Knowledge (synthesis)")
+                        for item in known_est[:5]:
+                            if isinstance(item, dict):
+                                finding = item.get("finding", "")
+                                support = item.get("support", item.get("evidence", ""))
+                                user_parts.append(f"- {finding} ({support})")
+                            else:
+                                user_parts.append(f"- {str(item)[:200]}")
+                        user_parts.append("")
+
+                    # Contested from synthesis
+                    known_con = syn.get("known_contested", [])
+                    if known_con:
+                        user_parts.append(f"## Contested Knowledge (synthesis)")
+                        for item in known_con[:5]:
+                            if isinstance(item, dict):
+                                debate = item.get("debate", item.get("contested_area", ""))
+                                user_parts.append(f"- {debate[:200]}")
+                            else:
+                                user_parts.append(f"- {str(item)[:200]}")
+                        user_parts.append("")
+
+                    # Gaps → write as research gaps section
                     gaps = syn.get("unknown_gaps", [])
                     if gaps:
-                        user_parts.append(f"## Unknown Gaps (deep lit)")
+                        user_parts.append(f"## Unknown Gaps (deep lit) — write as 'リサーチギャップ'")
                         for g in gaps[:5]:
-                            user_parts.append(f"- {g if isinstance(g, str) else str(g)[:150]}")
+                            if isinstance(g, dict):
+                                user_parts.append(f"- {g.get('gap', '')}: {g.get('description', g.get('importance', ''))[:150]}")
+                            else:
+                                user_parts.append(f"- {str(g)[:200]}")
                         user_parts.append("")
 
         # Layer 3: Cross-references (compact)

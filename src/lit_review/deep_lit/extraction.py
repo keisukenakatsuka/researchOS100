@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _EXTRACTION_SYSTEM = """\
 あなたは学術文献の構造化抽出の専門家です。
-各論文の abstract（と title）から以下の情報を抽出してください。
+各論文の title と abstract から以下の情報を抽出してください。
 
 抽出項目:
 1. variables: dependent / independent / control / instruments に分類
@@ -38,8 +38,13 @@ _EXTRACTION_SYSTEM = """\
 6. hypothesis_relevance: この論文が仮説をどう支持/反証するか
 7. notes_for_design: 研究設計に役立つ示唆
 
-abstractに情報がない場合は空配列/空文字で返してください。
-推測で埋めないでください。"""
+重要な指針:
+- abstract から合理的に推論できる情報は積極的に抽出してください
+- 例: "we analyze firm performance" → dependent に "firm performance" を抽出
+- 例: "using panel data from 2010-2020" → data_approach に "panel data, 2010-2020" を抽出
+- 例: "results show positive impact" → findings に direction: "positive" を抽出
+- findings は最低1件は抽出してください。論文の主張や結論が読み取れるはずです
+- 本当に何も推論できない場合のみ空にしてください"""
 
 
 # ------------------------------------------------------------------
@@ -237,14 +242,18 @@ def build_finding_map(
     negative = [f for f in all_findings if f.get("direction") == "negative"]
     null_findings = [f for f in all_findings if f.get("direction") == "null"]
 
+    # Build consensus and contested findings from all_findings
+    consensus_findings = _build_consensus(all_findings)
+    contested_findings = _build_contested(all_findings, all_disagreements)
+
     # Count limitation themes
     limitation_counter = Counter(all_limitations)
 
     return {
         "hypothesis_id": hypothesis_id,
         "total_findings": len(all_findings),
-        "consensus_findings": [],  # Populated by synthesis step
-        "contested_findings": [],
+        "consensus_findings": consensus_findings,
+        "contested_findings": contested_findings,
         "direction_summary": {
             "positive": len(positive),
             "negative": len(negative),
@@ -258,6 +267,137 @@ def build_finding_map(
         ],
         "gaps": [],  # Populated by synthesis step
     }
+
+
+def _normalize_claim(claim: str) -> str:
+    """Normalize a claim string for grouping."""
+    return claim.lower().strip().rstrip(".")
+
+
+def _build_consensus(
+    findings: List[Dict[str, Any]],
+    min_papers: int = 3,
+) -> List[Dict[str, Any]]:
+    """Identify consensus findings: claims with same direction from multiple papers.
+
+    Groups findings by normalized claim text. When 3+ papers agree on direction,
+    it's consensus. Falls back to direction-level aggregation if no claim-level
+    clusters meet the threshold.
+    """
+    # Group by normalized claim → {direction → [papers]}
+    claim_groups: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+    claim_original: Dict[str, str] = {}
+
+    for f in findings:
+        claim = f.get("claim", "")
+        if not claim:
+            continue
+        key = _normalize_claim(claim)
+        direction = f.get("direction", "null")
+        uid = f.get("paper_uid", "")
+        if uid and uid not in claim_groups[key][direction]:
+            claim_groups[key][direction].append(uid)
+        if key not in claim_original:
+            claim_original[key] = claim
+
+    # Exact claim-level consensus
+    consensus = []
+    for key, dir_map in claim_groups.items():
+        for direction, papers in dir_map.items():
+            if len(papers) >= min_papers:
+                consensus.append({
+                    "claim": claim_original[key],
+                    "direction": direction,
+                    "paper_count": len(papers),
+                    "strength": "strong" if len(papers) >= 5 else "moderate",
+                    "key_papers": papers[:5],
+                })
+
+    # If no claim-level consensus, fall back to direction-level aggregation
+    if not consensus:
+        dir_counts: Dict[str, List] = defaultdict(list)
+        for f in findings:
+            direction = f.get("direction", "null")
+            uid = f.get("paper_uid", "")
+            if uid:
+                dir_counts[direction].append(uid)
+
+        for direction, papers in dir_counts.items():
+            unique_papers = list(dict.fromkeys(papers))
+            if len(unique_papers) >= min_papers and direction != "null":
+                # Pick the most representative claim for this direction
+                dir_findings = [f for f in findings if f.get("direction") == direction]
+                high_conf = [f for f in dir_findings if f.get("confidence") == "high"]
+                representative = (high_conf[0] if high_conf else dir_findings[0]).get("claim", "")
+
+                consensus.append({
+                    "claim": representative,
+                    "direction": direction,
+                    "paper_count": len(unique_papers),
+                    "strength": "strong" if len(unique_papers) >= 10 else "moderate",
+                    "key_papers": unique_papers[:5],
+                })
+
+    consensus.sort(key=lambda x: x.get("paper_count", 0), reverse=True)
+    return consensus
+
+
+def _build_contested(
+    findings: List[Dict[str, Any]],
+    disagreements: List[str],
+    min_each_side: int = 2,
+) -> List[Dict[str, Any]]:
+    """Identify contested findings: topics where papers disagree on direction.
+
+    A topic is contested when it has both positive and negative findings
+    from different papers.
+    """
+    contested = []
+
+    # Check if findings have both positive and negative directions
+    positive_papers = set()
+    negative_papers = set()
+    for f in findings:
+        uid = f.get("paper_uid", "")
+        if not uid:
+            continue
+        if f.get("direction") == "positive":
+            positive_papers.add(uid)
+        elif f.get("direction") == "negative":
+            negative_papers.add(uid)
+
+    if len(positive_papers) >= min_each_side and len(negative_papers) >= min_each_side:
+        # There is a directional split — build a contested entry
+        pos_claims = [f for f in findings if f.get("direction") == "positive"]
+        neg_claims = [f for f in findings if f.get("direction") == "negative"]
+
+        # Pick representative claims from each side
+        pos_repr = pos_claims[0].get("claim", "") if pos_claims else ""
+        neg_repr = neg_claims[0].get("claim", "") if neg_claims else ""
+
+        contested.append({
+            "topic": "Hypothesis mechanism direction",
+            "positions": [
+                {"claim": pos_repr, "paper_count": len(positive_papers)},
+                {"claim": neg_repr, "paper_count": len(negative_papers)},
+            ],
+        })
+
+    # Add explicit disagreements from extraction
+    seen_topics = set()
+    for d in disagreements:
+        if not d:
+            continue
+        topic_key = _normalize_claim(d)[:60]
+        if topic_key in seen_topics:
+            continue
+        seen_topics.add(topic_key)
+        contested.append({
+            "topic": d,
+            "positions": [],  # Source-level disagreement, no structured positions
+        })
+
+    return contested
 
 
 # ------------------------------------------------------------------

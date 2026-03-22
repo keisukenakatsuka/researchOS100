@@ -34,7 +34,13 @@ _SYNTHESIS_SYSTEM = """\
 4. known_contested: 論争中の知見 (方向性が分かれる)
 5. unknown_gaps: 未解明の領域
 6. implications_for_hypothesis: 仮説への含意
-7. implications_for_design: 研究設計への含意"""
+7. implications_for_design: 研究設計への含意
+
+重要な指針:
+- known_established は Consensus Findings セクションの内容を直接反映してください。論文数と方向性を含めた具体的な記述にしてください
+- known_contested は Contested Findings セクションの対立構造を反映してください。対立する立場と各々の支持論文数を明記してください
+- unknown_gaps は consensus/contested で扱われていない、仮説検証に必要だが未解明の領域を特定してください
+- 各項目には具体的なエビデンス（論文数、方向性、効果の大きさ）を含めてください"""
 
 
 def synthesize_literature(
@@ -160,6 +166,30 @@ def _build_synthesis_context(
         f"negative={ds.get('negative', 0)}, "
         f"null={ds.get('null', 0)}"
     )
+
+    # Consensus findings — use these as basis for known_established
+    consensus = finding_map.get("consensus_findings", [])
+    if consensus:
+        parts.append(f"\n## Consensus Findings ({len(consensus)} — use for known_established)")
+        for c in consensus:
+            strength = c.get("strength", "")
+            direction = c.get("direction", "")
+            count = c.get("paper_count", 0)
+            claim = c.get("claim", "")[:200]
+            parts.append(f"- [{strength}, {direction}, {count} papers] {claim}")
+
+    # Contested findings — use these as basis for known_contested
+    contested = finding_map.get("contested_findings", [])
+    if contested:
+        parts.append(f"\n## Contested Findings ({len(contested)} — use for known_contested)")
+        for ct in contested[:10]:
+            topic = ct.get("topic", "")[:150]
+            positions = ct.get("positions", [])
+            if positions:
+                pos_strs = [f"{p.get('claim', '')[:60]} ({p.get('paper_count', 0)} papers)" for p in positions]
+                parts.append(f"- {topic}: {' vs '.join(pos_strs)}")
+            else:
+                parts.append(f"- {topic}")
 
     # Top disagreements
     disagreements = finding_map.get("disagreements", [])

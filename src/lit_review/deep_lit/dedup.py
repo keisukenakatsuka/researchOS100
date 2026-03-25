@@ -13,11 +13,13 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.lit_review.deep_lit import (
@@ -144,23 +146,54 @@ def rank_papers(
     hypothesis: Dict[str, Any],
     *,
     llm_client: Any,
+    use_cache: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Score all papers for relevance to hypothesis via LLM batch calls."""
-    stmt = hypothesis.get("hypothesis_statement", "")
-    llm_calls = 0
+    """Score all papers for relevance to hypothesis via LLM batch calls.
 
-    for i in range(0, len(papers), SCORING_BATCH_SIZE):
-        batch = papers[i:i + SCORING_BATCH_SIZE]
+    When use_cache is True, cached scores are reused and only uncached
+    papers are sent to the LLM. New scores are written back to the cache.
+    """
+    stmt = hypothesis.get("hypothesis_statement", "")
+    hyp_id = hypothesis.get("hypothesis_id", hypothesis.get("id", ""))
+
+    # Load cache
+    cache = _load_cache(hyp_id, stmt) if use_cache else {}
+    cache_hits = 0
+
+    # Partition: apply cached scores, collect uncached
+    uncached: List[int] = []  # indices into papers
+    for i, p in enumerate(papers):
+        uid = p.get("paper_uid", "")
+        if uid and uid in cache:
+            p["relevance_score"] = cache[uid]["score"]
+            p["relevance_reasoning"] = cache[uid]["reasoning"]
+            cache_hits += 1
+        else:
+            uncached.append(i)
+
+    # Score uncached papers via LLM
+    llm_calls = 0
+    newly_scored: List[Dict[str, Any]] = []
+
+    for batch_start in range(0, len(uncached), SCORING_BATCH_SIZE):
+        batch_indices = uncached[batch_start:batch_start + SCORING_BATCH_SIZE]
+        batch = [papers[i] for i in batch_indices]
         scores = _score_batch(batch, stmt, llm_client)
         llm_calls += 1
 
-        for j, p in enumerate(batch):
+        for j, idx in enumerate(batch_indices):
+            p = papers[idx]
             if scores and j < len(scores):
                 p["relevance_score"] = scores[j].get("score", 0)
                 p["relevance_reasoning"] = scores[j].get("reasoning", "")
             else:
                 p["relevance_score"] = 0
                 p["relevance_reasoning"] = "Scoring failed"
+            newly_scored.append(p)
+
+    # Update cache with new scores
+    if use_cache and newly_scored:
+        _update_cache(hyp_id, stmt, newly_scored)
 
     # Sort by relevance descending
     papers.sort(key=lambda p: p.get("relevance_score", 0), reverse=True)
@@ -169,7 +202,8 @@ def rank_papers(
     for i, p in enumerate(papers, 1):
         p["rank"] = i
 
-    logger.info("Ranked %d papers in %d LLM calls", len(papers), llm_calls)
+    logger.info("Ranked %d papers: %d cached, %d scored in %d LLM calls",
+                len(papers), cache_hits, len(newly_scored), llm_calls)
     return papers
 
 
@@ -266,6 +300,7 @@ def dedup_rank_select(
     llm_client: Any,
     min_papers: int = DEFAULT_MIN_PAPERS,
     max_papers: int = DEFAULT_MAX_PAPERS,
+    use_cache: bool = True,
 ) -> Dict[str, Any]:
     """Full pipeline: dedup → rank → select."""
     hypothesis_id = raw_result.get("hypothesis_id", "")
@@ -275,7 +310,7 @@ def dedup_rank_select(
     unique = dedup_papers(raw_papers)
 
     # Step 2: Rank
-    ranked = rank_papers(unique, hypothesis, llm_client=llm_client)
+    ranked = rank_papers(unique, hypothesis, llm_client=llm_client, use_cache=use_cache)
 
     # Step 3: Select
     final = select_papers(ranked, min_papers=min_papers, max_papers=max_papers)
@@ -299,3 +334,88 @@ def dedup_rank_select(
             "max_papers": max_papers,
         },
     }
+
+
+# ------------------------------------------------------------------
+# Scoring cache
+# ------------------------------------------------------------------
+
+_CACHE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "cache" / "scoring_cache"
+
+
+def _cache_path(hypothesis_id: str) -> Path:
+    """Resolve cache file path for a hypothesis."""
+    prefix = hypothesis_id[:12] if hypothesis_id else "unknown"
+    return _CACHE_DIR / f"{prefix}.json"
+
+
+def _stmt_hash(statement: str) -> str:
+    """Hash hypothesis statement for invalidation check."""
+    return hashlib.sha256(statement.encode()).hexdigest()[:16]
+
+
+def _load_cache(hypothesis_id: str, statement: str) -> Dict[str, Dict[str, Any]]:
+    """Load cached scores for a hypothesis.
+
+    Returns {paper_uid: {"score": int, "reasoning": str}} or empty dict
+    if cache is missing or hypothesis statement has changed.
+    """
+    path = _cache_path(hypothesis_id)
+    if not path.exists():
+        return {}
+
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Cache file corrupt, ignoring: %s", path)
+        return {}
+
+    # Invalidate if hypothesis statement changed
+    if data.get("hypothesis_statement_hash") != _stmt_hash(statement):
+        logger.info("Cache invalidated (hypothesis statement changed): %s", path.name)
+        return {}
+
+    entries = data.get("entries", {})
+    logger.info("Cache loaded: %d entries from %s", len(entries), path.name)
+    return entries
+
+
+def _update_cache(
+    hypothesis_id: str,
+    statement: str,
+    scored_papers: List[Dict[str, Any]],
+) -> None:
+    """Merge newly scored papers into the cache file."""
+    path = _cache_path(hypothesis_id)
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Load existing
+    data: Dict[str, Any] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+
+    stmt_h = _stmt_hash(statement)
+    if data.get("hypothesis_statement_hash") != stmt_h:
+        # Statement changed — reset cache
+        data = {
+            "hypothesis_id": hypothesis_id,
+            "hypothesis_statement_hash": stmt_h,
+            "entries": {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    entries = data.setdefault("entries", {})
+    for p in scored_papers:
+        uid = p.get("paper_uid", "")
+        if uid:
+            entries[uid] = {
+                "score": p.get("relevance_score", 0),
+                "reasoning": p.get("relevance_reasoning", ""),
+            }
+
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    logger.info("Cache updated: %d total entries in %s", len(entries), path.name)

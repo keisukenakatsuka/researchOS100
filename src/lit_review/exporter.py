@@ -196,6 +196,118 @@ def _build_metadata(
 
 
 # ------------------------------------------------------------------
+# Quality gate
+# ------------------------------------------------------------------
+
+@dataclass
+class QualityGateResult:
+    """Result of quality gate check."""
+    passed: bool = False
+    score: float = 0.0
+    min_required: float = 7.0
+    blocking_issues: List[Dict[str, str]] = field(default_factory=list)
+    suggestions: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def check_quality_gate(
+    run_dir: Path,
+    *,
+    min_score: float = 7.0,
+) -> QualityGateResult:
+    """Check if research output meets quality threshold for export.
+
+    Reads review_report.json from 099 and checks overall_quality_score.
+    Returns QualityGateResult with pass/fail, issues, and suggestions.
+    """
+    result = QualityGateResult(min_required=min_score)
+
+    review_path = run_dir / "review_report.json"
+    if not review_path.exists():
+        result.blocking_issues.append({"section": "review", "issue": "review_report.json not found — run 099 first"})
+        result.suggestions.append("Run 099_research_output_review before export")
+        return result
+
+    try:
+        review = json.loads(review_path.read_text())
+    except json.JSONDecodeError:
+        result.blocking_issues.append({"section": "review", "issue": "review_report.json is corrupt"})
+        return result
+
+    score = review.get("overall_quality_score", 0.0)
+    result.score = score
+
+    if score >= min_score:
+        result.passed = True
+        return result
+
+    # Build blocking issues from section diagnostics
+    for section in review.get("sections", []):
+        if not section.get("meets_target", True):
+            sid = section.get("section_id", "")
+            wc = section.get("word_count", 0)
+            target = section.get("target_words", 0)
+            ratio = section.get("word_ratio", 0)
+            result.blocking_issues.append({
+                "section": sid,
+                "issue": f"Word count {wc} vs target {target} (ratio={ratio:.2f})",
+            })
+        for w in section.get("warnings", []):
+            result.blocking_issues.append({
+                "section": section.get("section_id", ""),
+                "issue": w,
+            })
+
+    # L2 assessment
+    if not review.get("l2_passed", True):
+        result.blocking_issues.append({
+            "section": "overall",
+            "issue": "L2 cross-section assessment failed",
+        })
+
+    # Build suggestions
+    result.suggestions = _build_suggestions(result.blocking_issues, score, min_score)
+
+    return result
+
+
+def _build_suggestions(
+    issues: List[Dict[str, str]],
+    score: float,
+    min_score: float,
+) -> List[str]:
+    """Generate actionable improvement suggestions from blocking issues."""
+    suggestions: List[str] = []
+
+    for i in issues:
+        section = i.get("section", "")
+        issue = i.get("issue", "")
+
+        if "word count" in issue.lower() and "ratio=" in issue:
+            try:
+                ratio = float(issue.split("ratio=")[-1].rstrip(")"))
+            except ValueError:
+                ratio = 1.0
+            if ratio > 1.2:
+                suggestions.append(f"{section}: 語数を目標値以下に圧縮（現在 {ratio:.0%}）")
+            elif ratio < 0.8:
+                suggestions.append(f"{section}: 内容を補強して目標語数に近づける（現在 {ratio:.0%}）")
+        elif "citation" in issue.lower():
+            suggestions.append(f"{section}: 先行研究の引用 (Author, Year) を追加")
+        elif "l2" in issue.lower():
+            suggestions.append("セクション間の整合性を確認（RQ-仮説-手法の一貫性）")
+        elif "theoretical grounding" in issue.lower():
+            suggestions.append(f"{section}: 理論的根拠の引用を追加")
+
+    if not suggestions:
+        suggestions.append(f"Quality score {score:.1f} → {min_score:.1f} に改善が必要。099 review_report.md の指摘事項を確認")
+
+    return suggestions
+
+
+# ------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------
 

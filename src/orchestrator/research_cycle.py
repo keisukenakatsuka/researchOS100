@@ -104,6 +104,9 @@ PIPELINE_STEPS: List[StepConfig] = [
     StepConfig("119", "src.scripts.119_hyp_literature_synthesis",
                "Per-hypothesis literature synthesis",
                phase="deep_literature", optional=True),
+    StepConfig("119b", "src.scripts.119b_evidence_sufficiency",
+               "Evidence sufficiency check",
+               phase="deep_literature", optional=True),
 
     StepConfig("090", "src.scripts.090_validation_designer",
                "Validation design per hypothesis",
@@ -307,6 +310,7 @@ def build_step_args(
     rq_id: Optional[str] = None,
     min_score: int = 65,
     max_papers: int = 20,
+    continue_on_error: bool = False,
 ) -> List[str]:
     """Build subprocess command arguments for a step."""
     args = [sys.executable, "-m", step.module]
@@ -327,6 +331,14 @@ def build_step_args(
                 min_score=min_score,
                 max_papers=max_papers,
             ))
+
+    # 119b: force through evidence gate when --continue-on-error is set
+    if step.name == "119b" and continue_on_error:
+        args.append("--force")
+
+    # 100: skip quality gate when --continue-on-error is set
+    if step.name == "100" and continue_on_error:
+        args.append("--skip-quality-gate")
 
     return args
 
@@ -483,6 +495,7 @@ def run_pipeline(
             step, run_id,
             rq_text=rq_text, rq_id=rq_id,
             min_score=min_score, max_papers=max_papers,
+            continue_on_error=continue_on_error,
         )
         logger.debug("Command: %s", " ".join(cmd))
 

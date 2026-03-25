@@ -41,6 +41,8 @@ def parse_args():
                    help="Minimum papers to retain per hypothesis (default: 100)")
     p.add_argument("--max-papers", type=int, default=150,
                    help="Maximum papers to retain per hypothesis (default: 150)")
+    p.add_argument("--no-cache", action="store_true",
+                   help="Disable scoring cache (re-score all papers via LLM)")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
@@ -111,6 +113,7 @@ def main():
             llm_client=llm_client,
             min_papers=args.min_papers,
             max_papers=args.max_papers,
+            use_cache=not args.no_cache,
         )
 
         out_path = h_dir / "hyp_papers_ranked.json"

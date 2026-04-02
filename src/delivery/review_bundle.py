@@ -85,6 +85,13 @@ def build_review_bundle(
     else:
         _add_fallback(doc, "No evidence_sufficiency.json files found")
 
+    # --- Section 4: Literature Corpus Appendix ---
+    appendix_md = _read_file(run_dir / "appendix_literature_corpus.md")
+    if appendix_md:
+        doc.add_page_break()
+        _add_section_heading(doc, "4. Appendix A: Literature Corpus")
+        _render_markdown(doc, appendix_md)
+
     # --- Save ---
     ts = datetime.now().strftime("%Y%m%d_%H%M")
     filename = f"review_bundle_{ts}.docx"
@@ -128,7 +135,9 @@ def _add_title_page(doc: Document, *, run_id: str, rq_title: str, generated_at: 
     toc_run.bold = True
     toc_run.font.size = Pt(14)
 
-    for item in ["1. Paper Draft", "2. Review Report", "3. Evidence Sufficiency"]:
+    toc_items = ["1. Paper Draft", "2. Review Report", "3. Evidence Sufficiency",
+                  "4. Appendix A: Literature Corpus"]
+    for item in toc_items:
         p = doc.add_paragraph(item, style="List Number")
 
 

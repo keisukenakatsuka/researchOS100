@@ -22,14 +22,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LIT_DATA_DIR = PROJECT_ROOT / "data" / "lit_review"
 QF_DATA_DIR = PROJECT_ROOT / "data" / "question_formation"
 
-# Phase display names
+# Phase display names (v2 — superset of v1)
 PHASE_LABELS = {
+    "data_audit": "Phase 0: Data Source Audit",
     "lit_review": "Phase 1: Literature Review",
-    "hypothesis": "Phase 2: Hypothesis Development",
-    "deep_literature": "Phase 2b: Literature Deep Dive",
-    "output": "Phase 3: Research Output",
+    "hypothesis": "Phase 2a: Hypothesis Development",
+    "deep_literature": "Phase 2a-ext: Literature Deep Dive",
+    "data_build": "Phase 2b: Data Collection & Build",
+    "output": "Phase 3a: Research Output",
+    "empirical": "Phase 3b: Empirical Analysis",
     "next_rq": "Phase 4: Next-Run Generation",
     "visualization": "Phase 5: Visualization",
+}
+
+# Phase number mapping for --stop-after-phase
+PHASE_NUMBER_MAP = {
+    0: ["data_audit"],
+    1: ["lit_review", "hypothesis", "deep_literature"],
+    2: ["data_build"],
+    3: ["output", "empirical"],
+    4: ["next_rq"],
+    5: ["visualization"],
 }
 
 
@@ -182,6 +195,34 @@ PIPELINE_STEPS: List[StepConfig] = [
                phase="visualization"),
 ]
 
+# ------------------------------------------------------------------
+# v2 conditional steps (only when --data-dir is provided)
+# ------------------------------------------------------------------
+
+PHASE_0_STEPS: List[StepConfig] = [
+    StepConfig("125", "src.scripts.125_data_source_audit",
+               "Data source audit (DV feasibility, field coverage)",
+               phase="data_audit"),
+    StepConfig("128-pre", "src.scripts.128_export_validator",
+               "Export validation (pre-build, sample check)",
+               phase="data_audit"),
+]
+
+PHASE_2B_STEPS: List[StepConfig] = [
+    StepConfig("128", "src.scripts.128_export_validator",
+               "Export validation (full data)",
+               phase="data_build"),
+    StepConfig("130", "src.scripts.130_build_deal_dataset",
+               "Build unified deal-level dataset",
+               phase="data_build"),
+]
+
+PHASE_3B_STEPS: List[StepConfig] = [
+    StepConfig("132", "src.scripts.132_regression_runner",
+               "Regression analysis (main + robustness + heterogeneity)",
+               phase="empirical"),
+]
+
 # Expected outputs for 101-105 (in data/question_formation/from_<run_id>/)
 QF_OUTPUTS: Dict[str, List[str]] = {
     "101": ["rq_candidates.json", "rq_candidates.md"],
@@ -229,6 +270,188 @@ def build_execution_plan(
             break
 
     return plan
+
+
+# ------------------------------------------------------------------
+# v2 execution plan
+# ------------------------------------------------------------------
+
+def build_execution_plan_v2(
+    *,
+    include_optional: bool = False,
+    skip_steps: Optional[List[str]] = None,
+    stop_after: Optional[str] = None,
+    stop_after_phase: Optional[int] = None,
+    has_data_dir: bool = False,
+    skip_empirical: bool = False,
+) -> List[StepConfig]:
+    """Build v2 execution plan with conditional phases.
+
+    When has_data_dir=False, this produces the same plan as build_execution_plan()
+    (v1 backward compatibility).
+    """
+    skip_set = set(skip_steps or [])
+    plan: List[StepConfig] = []
+
+    # Collect allowed phases based on stop_after_phase
+    allowed_phases = None
+    if stop_after_phase is not None:
+        allowed_phases = set()
+        for pn in range(stop_after_phase + 1):
+            for phase_key in PHASE_NUMBER_MAP.get(pn, []):
+                allowed_phases.add(phase_key)
+
+    def _add_steps(steps: List[StepConfig]):
+        for step in steps:
+            if allowed_phases is not None and step.phase not in allowed_phases:
+                continue
+            if step.optional and not include_optional:
+                continue
+            if step.name in skip_set:
+                continue
+            plan.append(step)
+            if stop_after and step.name == stop_after:
+                return True  # signal to stop
+        return False
+
+    # Phase 0 (conditional)
+    if has_data_dir:
+        if _add_steps(PHASE_0_STEPS):
+            return plan
+
+    # Phase 1 + 2a: lit_review + hypothesis + deep_literature only
+    phase_1_2a = [s for s in PIPELINE_STEPS
+                  if s.phase in ("lit_review", "hypothesis", "deep_literature")]
+    if _add_steps(phase_1_2a):
+        return plan
+
+    # Phase 2b: Data Collection & Build (conditional)
+    if has_data_dir:
+        if _add_steps(PHASE_2B_STEPS):
+            return plan
+
+    # Phase 3a: Research Output
+    phase_3a = [s for s in PIPELINE_STEPS if s.phase == "output"]
+    if _add_steps(phase_3a):
+        return plan
+
+    # Phase 3b: Empirical Analysis (conditional)
+    if has_data_dir and not skip_empirical:
+        if _add_steps(PHASE_3B_STEPS):
+            return plan
+
+    # Phase 4 + 5: next_rq + visualization
+    phase_4_5 = [s for s in PIPELINE_STEPS
+                 if s.phase in ("next_rq", "visualization")]
+    if _add_steps(phase_4_5):
+        return plan
+
+    return plan
+
+
+# ------------------------------------------------------------------
+# Go/No-Go gates
+# ------------------------------------------------------------------
+
+@dataclass
+class GateCheck:
+    """A single gate check item."""
+    name: str
+    passed: bool
+    value: str
+    threshold: str
+    message: str = ""
+
+
+@dataclass
+class GateResult:
+    """Result of a phase gate evaluation."""
+    passed: bool
+    phase: str
+    checks: List[GateCheck] = field(default_factory=list)
+
+
+def check_phase_0_gate(audit_result, validator_result=None) -> GateResult:
+    """Evaluate Phase 0 gate (DV feasibility + field coverage)."""
+    checks = []
+
+    # Check 1: At least 1 feasible DV
+    feasible = audit_result.feasible_dvs
+    checks.append(GateCheck(
+        name="Feasible DVs",
+        passed=len(feasible) >= 1,
+        value=str(len(feasible)),
+        threshold=">= 1",
+        message=f"Feasible: {', '.join(feasible)}" if feasible
+                else "No feasible DVs. Check 125 output for proxy suggestions.",
+    ))
+
+    # Check 2: Core field coverage
+    for fld, min_rate in [("Company Status", 0.9), ("Deal Date", 0.9)]:
+        rate = audit_result.coverage.get(fld, 0)
+        checks.append(GateCheck(
+            name=f"{fld} coverage",
+            passed=rate >= min_rate,
+            value=f"{rate:.0%}",
+            threshold=f">= {min_rate:.0%}",
+            message="" if rate >= min_rate else "Re-check export filters.",
+        ))
+
+    # Check 3: Co-investment rate (informational, never blocks)
+    if audit_result.co_investment_rate is not None:
+        checks.append(GateCheck(
+            name="Co-investment rate",
+            passed=True,
+            value=f"{audit_result.co_investment_rate:.0%}",
+            threshold="info",
+            message=audit_result.treatment_definition,
+        ))
+
+    passed = all(c.passed for c in checks)
+    return GateResult(passed=passed, phase="Phase 0", checks=checks)
+
+
+def check_phase_2_gate(dataset_stats: Dict[str, int]) -> GateResult:
+    """Evaluate Phase 2 gate (sample size)."""
+    checks = []
+
+    checks.append(GateCheck(
+        name="Treatment count",
+        passed=dataset_stats.get("treatment", 0) >= 100,
+        value=str(dataset_stats.get("treatment", 0)),
+        threshold=">= 100",
+        message="" if dataset_stats.get("treatment", 0) >= 100
+                else "Expand GVC list or add countries.",
+    ))
+
+    checks.append(GateCheck(
+        name="Control count",
+        passed=dataset_stats.get("control", 0) >= 500,
+        value=str(dataset_stats.get("control", 0)),
+        threshold=">= 500",
+        message="" if dataset_stats.get("control", 0) >= 500
+                else "Expand PVC list.",
+    ))
+
+    passed = all(c.passed for c in checks)
+    return GateResult(passed=passed, phase="Phase 2", checks=checks)
+
+
+def print_gate_result(gate: GateResult) -> None:
+    """Print gate evaluation to stdout."""
+    status = "PASS" if gate.passed else "FAIL"
+    sep = "=" * 55
+    print(f"\n{sep}")
+    print(f"  {gate.phase} Gate -- {status}")
+    print(sep)
+    for c in gate.checks:
+        icon = "ok" if c.passed else "FAIL"
+        print(f"  [{icon:>4}] {c.name}: {c.value} (threshold: {c.threshold})")
+        if c.message:
+            print(f"         -> {c.message}")
+    if not gate.passed:
+        print(f"\n  Pipeline stopped at {gate.phase}.")
+        print(f"  Fix the issues above and re-run.")
 
 
 # ------------------------------------------------------------------

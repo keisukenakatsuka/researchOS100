@@ -62,6 +62,14 @@ from src.orchestrator.research_cycle import (
     print_gate_result,
 )
 
+from src.paper.orchestrator_hook import (
+    on_run_start,
+    on_gate_pass,
+    on_gate_fail,
+    on_pipeline_complete,
+    on_data_pause,
+)
+
 logger = logging.getLogger("108_research_cycle_orchestrator")
 
 
@@ -144,6 +152,13 @@ def parse_args() -> argparse.Namespace:
     # Timeout
     p.add_argument("--step-timeout", type=int, default=2400,
                     help="Per-step timeout in seconds (default: 2400)")
+
+    # Paper management
+    p.add_argument(
+        "--paper-id", type=str, default=None,
+        help="Link this run to a Paper Registry entry (optional). "
+             "Enables automatic stage/status updates and task creation on gate results.",
+    )
 
     # General
     p.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
@@ -412,7 +427,10 @@ def main() -> None:
         gate_0, audit_result, validator_result = _run_phase_0(
             args.data_dir, gvc_names, dv_candidates)
 
-        if not gate_0.passed:
+        if gate_0.passed:
+            on_gate_pass(args.paper_id, gate_0, run_id=run_id)
+        else:
+            on_gate_fail(args.paper_id, gate_0)
             if not args.continue_on_error:
                 sys.exit(3)
             print("  Continuing despite Phase 0 failure (--continue-on-error)")
@@ -451,6 +469,7 @@ def main() -> None:
             sys.exit(1)
 
         run_id = result.run_id or run_id
+        on_run_start(args.paper_id, run_id)
 
     # ===== Phase 2b: Data Collection & Build (v2 only) =====
     if is_v2 and phase2b_plan:
@@ -464,12 +483,16 @@ def main() -> None:
         elif len(csv_files) >= 2:
             val_result, gate_2 = _run_phase_2b(args.data_dir, gvc_names, run_id)
 
-            if gate_2 and not gate_2.passed:
-                if not args.continue_on_error:
-                    if result:
-                        print_summary(result)
-                    sys.exit(4)
-                print("  Continuing despite Phase 2 failure (--continue-on-error)")
+            if gate_2:
+                if gate_2.passed:
+                    on_gate_pass(args.paper_id, gate_2, run_id=run_id)
+                else:
+                    on_gate_fail(args.paper_id, gate_2)
+                    if not args.continue_on_error:
+                        if result:
+                            print_summary(result)
+                        sys.exit(4)
+                    print("  Continuing despite Phase 2 failure (--continue-on-error)")
 
             if val_result and not val_result.passed:
                 if not args.continue_on_error:
@@ -486,6 +509,7 @@ def main() -> None:
             print(f"  Expected files: {{country}}_gvc.csv, {{country}}_pvc.csv")
             if run_id:
                 print(f"  Then re-run with: --run-id {run_id} --data-dir {args.data_dir}")
+            on_data_pause(args.paper_id, args.data_dir, run_id=run_id)
             print()
             sys.exit(0)  # Clean exit
 
@@ -528,6 +552,10 @@ def main() -> None:
     # ===== Kindle Delivery (optional) =====
     if args.send_kindle and run_id:
         _run_kindle_delivery(run_id)
+
+    # Paper: mark pipeline complete
+    if result:
+        on_pipeline_complete(args.paper_id, result.success, run_id=run_id)
 
     # Summary
     if result:
